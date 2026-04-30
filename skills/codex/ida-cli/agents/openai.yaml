@@ -1,0 +1,4 @@
+interface:
+  display_name: "IDA CLI"
+  short_description: "Drive IDA Pro through an AI JSONL kernel"
+  default_prompt: "Use $ida-cli to inspect the local IDA target with the JSONL kernel."
