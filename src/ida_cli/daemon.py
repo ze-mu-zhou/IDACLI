@@ -19,9 +19,34 @@ _DEFAULT_DAEMON_DIR = "~/.ida-cli/daemons"
 # When running inside WSL (Windows Python spawned from WSL), use a shared
 # temp directory that is accessible from both Windows and Linux sides.
 _WSL_DAEMON_DIR = "/tmp/.ida-cli/daemons"
-_DAEMON_HOST = "127.0.0.1"
+_DAEMON_HOST = "0.0.0.0"  # bind all interfaces for WSL/Windows cross-access
+_WSL_HOST = "127.0.0.1"  # default; overridden at runtime for WSL clients
 _STARTUP_POLL_INTERVAL = 0.05  # seconds
 _STARTUP_TIMEOUT = 15.0  # seconds
+
+
+def _get_connect_host() -> str:
+    """Return the host address for clients to connect to the daemon.
+
+    On WSL Linux, localhost doesn't reach Windows services — use the
+    WSL gateway IP instead. On native platforms, use 127.0.0.1.
+    """
+    # Check if we're on the WSL client side (Linux, not Windows)
+    if os.name != "nt" and Path("/proc/sys/fs/binfmt_misc/WSLInterop").is_file():
+        try:
+            import subprocess as sp
+            result = sp.run(
+                ["ip", "route", "show", "default"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for word in result.stdout.split():
+                    # The gateway is typically the third word after "default via"
+                    if result.stdout.startswith("default via "):
+                        return result.stdout.split()[2]
+        except Exception:
+            pass
+    return "127.0.0.1"
 
 
 def _wsl_to_win_path(linux_path: str) -> str:
@@ -82,8 +107,25 @@ def get_daemon_dir() -> Path:
 
 
 def get_target_id(target_path: str) -> str:
-    """Return a deterministic short hash for a target path."""
-    return hashlib.sha256(target_path.encode()).hexdigest()[:16]
+    """Return a deterministic short hash for a target path.
+
+    Normalizes WSL paths (/mnt/d/...) to Windows form (D:\\...) so
+    daemon (Windows Python) and client (WSL Python) produce the same hash.
+    """
+    # Normalize WSL /mnt/X/ paths to X:\ for consistent hashing
+    normalized = _normalize_target_path(target_path)
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
+def _normalize_target_path(path: str) -> str:
+    """Convert /mnt/d/path to D:\\path for consistent cross-platform hashing."""
+    p = path.replace("\\", "/")
+    if p.startswith("/mnt/") and len(p) > 6:
+        drive = p[5].upper()
+        tail = p[7:]
+        sep = "\\"
+        return f"{drive}:{sep}{tail.replace('/', sep)}"
+    return path
 
 
 def get_port_path(target_path: str) -> str:
@@ -107,14 +149,10 @@ def is_daemon_running(target_path: str) -> bool:
         port = int(Path(port_path).read_text().strip())
     except (OSError, ValueError):
         return False
-    # Verify PID is alive
+    # Verify port is actually listening (PID check unreliable cross-platform)
     try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    # Verify port is actually listening
-    try:
-        probe = socket.create_connection((_DAEMON_HOST, port), timeout=0.5)
+        host = _get_connect_host()
+        probe = socket.create_connection((host, port), timeout=0.5)
         probe.close()
         return True
     except OSError:
@@ -215,7 +253,8 @@ class DaemonClient:
                 f"Start with: ida-ai --daemon {self._target_path}"
             )
         port = int(Path(get_port_path(self._target_path)).read_text().strip())
-        self._addr = (_DAEMON_HOST, port)
+        host = _get_connect_host()
+        self._addr = (host, port)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         started = time.monotonic()
         while True:
