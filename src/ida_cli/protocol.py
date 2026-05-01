@@ -140,13 +140,16 @@ def encode_jsonl(message: JsonObject) -> str:
     """Serialize one protocol line. When modifying this, preserve compact sorted-key JSON."""
     if not isinstance(message, dict):
         raise TypeError("protocol message must be a JSON object")
-    return json.dumps(
+    raw = json.dumps(
         message,
         allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ) + "\n"
+    )
+    # json.dumps guarantees single-line output, but Windows Python
+    # can inject \r in text-mode pipes; strip defensively.
+    return raw.replace("\r", "") + "\n"
 
 
 def write_jsonl(stream: TextIO, message: JsonObject) -> None:

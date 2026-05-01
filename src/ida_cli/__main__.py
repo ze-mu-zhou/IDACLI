@@ -39,9 +39,9 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     finally:
         session.close()
 
-
 def _serve(runtime: object, stdin: TextIO, stdout: TextIO) -> int:
-    """Process JSONL requests until EOF or a fail-fast protocol error."""
+    """Process JSONL requests until EOF, skipping malformed lines."""
+
     for line in stdin:
         if line.strip() == "":
             continue
@@ -50,13 +50,13 @@ def _serve(runtime: object, stdin: TextIO, stdout: TextIO) -> int:
             request = parse_request(line)
         except BadJsonError as exc:
             write_jsonl(stdout, bad_json_response(exc, elapsed_ms=_elapsed_ms(started_ns)))
-            return 1
+            continue
         except RequestFormatError as exc:
             write_jsonl(
                 stdout,
                 _startup_error(type(exc).__name__, str(exc), elapsed_ms=_elapsed_ms(started_ns)),
             )
-            return 1
+            continue
         response = runtime.execute_request(request)
         write_jsonl(stdout, response)
     return 0
