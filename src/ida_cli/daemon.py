@@ -16,15 +16,45 @@ from typing import Any
 
 
 _DEFAULT_DAEMON_DIR = "~/.ida-cli/daemons"
+# When running inside WSL (Windows Python spawned from WSL), use a shared
+# temp directory that is accessible from both Windows and Linux sides.
+_WSL_DAEMON_DIR = "/tmp/.ida-cli/daemons"
 _DAEMON_HOST = "127.0.0.1"
 _STARTUP_POLL_INTERVAL = 0.05  # seconds
 _STARTUP_TIMEOUT = 15.0  # seconds
 
 
+def _wsl_to_win_path(linux_path: str) -> str:
+    """Convert a WSL path to Windows UNC path for cross-filesystem access."""
+    try:
+        import subprocess as sp
+        result = sp.run(
+            ["wsl.exe", "wslpath", "-w", linux_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return linux_path
+
+
 def get_daemon_dir() -> Path:
-    """Return the daemon runtime directory (created on first use)."""
+    """Return the daemon runtime directory (created on first use).
+
+    When WSLENV is set (Windows Python spawned from WSL), uses /tmp/.ida-cli/
+    converted to a Windows-accessible UNC path. The WSL Linux side reads the
+    same files directly via /tmp/.ida-cli/.
+    """
     env = os.environ.get("IDA_CLI_DAEMON_DIR")
-    path = Path(env).expanduser() if env else Path(_DEFAULT_DAEMON_DIR).expanduser()
+    if env:
+        path = Path(env).expanduser()
+    elif os.environ.get("WSLENV"):
+        path = Path(_WSL_DAEMON_DIR)
+        if os.name == "nt":
+            path = Path(_wsl_to_win_path(str(path)))
+    else:
+        path = Path(_DEFAULT_DAEMON_DIR).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
