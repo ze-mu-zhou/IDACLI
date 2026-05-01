@@ -191,7 +191,6 @@ src/ida_cli/
 | 文档 | 说明 |
 |---|---|
 | [AI 安装指南](docs/AI_INSTALL.md) | 面向 AI Agent 的安装流程 |
-| [AGENTS.md](AGENTS.md) | 项目规则与设计原则 |
 
 ## License
 

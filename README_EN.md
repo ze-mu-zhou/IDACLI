@@ -191,7 +191,6 @@ src/ida_cli/
 | Document | Description |
 |---|---|
 | [AI Install Guide](docs/AI_INSTALL.md) | Step-by-step setup for AI agents |
-| [AGENTS.md](AGENTS.md) | Project rules and design principles |
 
 ## License
 
