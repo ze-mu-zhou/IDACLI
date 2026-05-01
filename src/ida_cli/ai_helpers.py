@@ -135,10 +135,10 @@ class AIHelpers:
         idautils = self._require_module("idautils")
         return [self._xref_record(xref) for xref in idautils.XrefsFrom(ea)]
 
-    def strings(self, limit: int | None = None) -> list[dict[str, Any]]:
+    def strings(self, string_limit: int | None = None) -> list[dict[str, Any]]:
         """Return IDA string records up to an optional bounded limit."""
 
-        max_items = None if limit is None else self._checked_limit(limit, "limit", allow_zero=True)
+        max_items = None if string_limit is None else self._checked_limit(string_limit, "string_limit", allow_zero=True)
         idautils = self._require_module("idautils")
         records: list[dict[str, Any]] = []
         for item in idautils.Strings():
@@ -1149,10 +1149,10 @@ def xrefs_from(ea_or_name: int | str) -> list[dict[str, Any]]:
     return ai.xrefs_from(ea_or_name)
 
 
-def strings(limit: int | None = None) -> list[dict[str, Any]]:
+def strings(string_limit: int | None = None) -> list[dict[str, Any]]:
     """Delegate to the default helper object's string enumeration."""
 
-    return ai.strings(limit)
+    return ai.strings(string_limit)
 
 
 def imports() -> list[dict[str, Any]]:

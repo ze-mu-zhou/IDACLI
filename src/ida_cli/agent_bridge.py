@@ -13,6 +13,7 @@ from os import PathLike
 from typing import Any, TextIO
 
 from .protocol import encode_jsonl
+from .wsl import find_ida_python, is_wsl, wsl_to_win
 
 _CLOSE_TIMEOUT_SECONDS = 5
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -59,15 +60,23 @@ class AgentSession:
         probe_backend: bool = False,
         require_ida: bool = False,
     ) -> "AgentSession":
-        """Launch one kernel and append the target path as the only runtime argument."""
+        """Launch one kernel and append the target path as the only runtime argument.
 
+        In WSL, auto-detects Windows Python with idapro and converts WSL paths
+        to Windows paths transparently. Set IDA_CLI_PYTHON to override detection.
+        """
+
+        target = str(target_path)
+        if command is None and is_wsl():
+            command = (find_ida_python(), "-B", "-m", "ida_cli")
+            target = wsl_to_win(target)
         argv = tuple(command) if command is not None else (sys.executable, "-B", "-m", "ida_cli")
         if not argv:
             raise AgentBridgeError("agent bridge command must not be empty")
         stderr_file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
         try:
             process = subprocess.Popen(
-                (*argv, str(target_path)),
+                (*argv, target),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=stderr_file,

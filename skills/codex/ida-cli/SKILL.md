@@ -32,6 +32,9 @@ skipped, the runtime next checks `IDADIR` and bounded Windows install layouts.
 Full-drive discovery is slow and off by default; opt into it with
 `IDA_CLI_DEEP_IDA_DISCOVERY=1` only as a last resort.
 
+In WSL, `AgentSession` auto-detects the Windows Python with idapro and converts
+paths automatically. Set `IDA_CLI_PYTHON` to override.
+
 ## Agent Bridge
 
 Prefer the importable bridge for Codex tool runs:
