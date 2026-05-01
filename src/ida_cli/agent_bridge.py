@@ -237,6 +237,9 @@ def _join_thread(thread: threading.Thread | None) -> None:
 
 
 def _validate_response_id(request: Mapping[str, Any], response: Mapping[str, Any]) -> None:
+    # Startup/out-of-band errors have no request id — surface the real error
+    if "id" in request and "id" not in response and response.get("ok") is False:
+        raise AgentBridgeError(_response_error_message(response), response=dict(response))
     if "id" in request and response.get("id") != request["id"]:
         raise AgentBridgeError("kernel response id does not match request id")
     if "id" not in request and "id" in response:
