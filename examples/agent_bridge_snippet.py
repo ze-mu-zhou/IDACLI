@@ -12,7 +12,7 @@ def collect_entry_inventory(target_path: str | Path) -> dict[str, Any]:
     """Collect a small manifest and artifact-backed function inventory."""
 
     with AgentSession.start(target_path, require_ida=True) as ida:
-        backend = ida.backend
+        backend = ida.probe_backend(require_ida=True)
         manifest = ida.result(
             "__result__ = {'backend': __backend__, 'database_path': __database_path__, 'run_dir': __run_dir__}",
             request_id="session.manifest",

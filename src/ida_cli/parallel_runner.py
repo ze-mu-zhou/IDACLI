@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import json
@@ -24,7 +25,6 @@ from .worker_pool import (
     WorkerProcessCrash,
     WorkerResult,
     WorkerSpec,
-    canonical_json,
     json_compatible_value,
 )
 
@@ -334,14 +334,17 @@ class LocalParallelRunner:
             if shard.worker_id not in self._launch_by_worker:
                 raise ValueError(f"missing launch plan for worker_id: {shard.worker_id}")
         records: list[WorkerResult | None] = [None for _ in plan.shards]
+        worker_shards: dict[str, list[tuple[int, WorkShard]]] = defaultdict(list)
+        for index, shard in enumerate(plan.shards):
+            worker_shards[shard.worker_id].append((index, shard))
         started_ns = time.perf_counter_ns()
         threads = tuple(
             threading.Thread(
-                target=self._run_one_shard,
-                args=(index, specs[shard.worker_id], shard, code_text, selected_timeout, records),
+                target=self._run_worker_shards,
+                args=(specs[worker_id], tuple(assignments), code_text, selected_timeout, records),
                 daemon=False,
             )
-            for index, shard in enumerate(plan.shards)
+            for worker_id, assignments in worker_shards.items()
         )
         for thread in threads:
             thread.start()
@@ -353,62 +356,75 @@ class LocalParallelRunner:
             elapsed_ms=_elapsed_ms_since(started_ns),
         )
 
-    def _run_one_shard(
+    def _run_worker_shards(
         self,
-        index: int,
         spec: WorkerSpec,
-        shard: WorkShard,
+        assignments: tuple[tuple[int, WorkShard], ...],
         code: str,
         timeout_s: float,
         records: list[WorkerResult | None],
     ) -> None:
-        launch = self._launch_by_worker.get(shard.worker_id)
+        launch = self._launch_by_worker.get(spec.worker_id)
         if launch is None:
-            raise ValueError(f"missing launch plan for worker_id: {shard.worker_id}")
-        started_ns = time.perf_counter_ns()
-        worker = JsonlWorkerProcess(launch)
+            raise ValueError(f"missing launch plan for worker_id: {spec.worker_id}")
+        worker: JsonlWorkerProcess | None = None
         try:
-            worker.start()
-            request = build_worker_request(shard=shard, code=code)
-            response = worker.request(request, timeout_s=timeout_s)
-            records[index] = worker_response_to_result(
-                spec=spec,
-                shard=shard,
-                response=response,
-                elapsed_ms=_elapsed_ms_since(started_ns),
-            )
-        except WorkerTimeoutError:
-            timeout = WorkerTimeoutRecord(
-                spec.worker_id,
-                shard.shard_id,
-                max(1, int(timeout_s * 1000)),
-                worker.stderr_tail(),
-            )
-            records[index] = WorkerResult.from_crash(
-                worker_id=spec.worker_id,
-                shard_id=shard.shard_id,
-                item_count=shard.item_count,
-                elapsed_ms=_elapsed_ms_since(started_ns),
-                crash=timeout.as_crash(),
-            )
-        except WorkerProcessCrash as exc:
-            records[index] = WorkerResult.from_crash(
-                worker_id=spec.worker_id,
-                shard_id=shard.shard_id,
-                item_count=shard.item_count,
-                elapsed_ms=_elapsed_ms_since(started_ns),
-                crash=WorkerCrash(spec.worker_id, shard.shard_id, exc.returncode, exc.message, exc.stderr_tail),
-            )
-        except Exception as exc:
-            records[index] = WorkerResult.from_error(
-                worker_id=spec.worker_id,
-                shard_id=shard.shard_id,
-                item_count=shard.item_count,
-                elapsed_ms=_elapsed_ms_since(started_ns),
-                error=WorkerError.from_exception(spec.worker_id, shard.shard_id, exc),
-            )
+            for index, shard in assignments:
+                started_ns = time.perf_counter_ns()
+                try:
+                    if worker is None:
+                        worker = JsonlWorkerProcess(launch)
+                        worker.start()
+                    request = build_worker_request(shard=shard, code=code)
+                    response = worker.request(request, timeout_s=timeout_s)
+                    records[index] = worker_response_to_result(
+                        spec=spec,
+                        shard=shard,
+                        response=response,
+                        elapsed_ms=_elapsed_ms_since(started_ns),
+                    )
+                except WorkerTimeoutError:
+                    timeout = WorkerTimeoutRecord(
+                        spec.worker_id,
+                        shard.shard_id,
+                        max(1, int(timeout_s * 1000)),
+                        "" if worker is None else worker.stderr_tail(),
+                    )
+                    records[index] = WorkerResult.from_crash(
+                        worker_id=spec.worker_id,
+                        shard_id=shard.shard_id,
+                        item_count=shard.item_count,
+                        elapsed_ms=_elapsed_ms_since(started_ns),
+                        crash=timeout.as_crash(),
+                    )
+                    if worker is not None:
+                        worker.close()
+                        worker = None
+                except WorkerProcessCrash as exc:
+                    records[index] = WorkerResult.from_crash(
+                        worker_id=spec.worker_id,
+                        shard_id=shard.shard_id,
+                        item_count=shard.item_count,
+                        elapsed_ms=_elapsed_ms_since(started_ns),
+                        crash=WorkerCrash(spec.worker_id, shard.shard_id, exc.returncode, exc.message, exc.stderr_tail),
+                    )
+                    if worker is not None:
+                        worker.close()
+                        worker = None
+                except Exception as exc:
+                    records[index] = WorkerResult.from_error(
+                        worker_id=spec.worker_id,
+                        shard_id=shard.shard_id,
+                        item_count=shard.item_count,
+                        elapsed_ms=_elapsed_ms_since(started_ns),
+                        error=WorkerError.from_exception(spec.worker_id, shard.shard_id, exc),
+                    )
+                    if worker is not None:
+                        worker.close()
+                        worker = None
         finally:
-            worker.close()
+            if worker is not None:
+                worker.close()
 
 
 def plan_database_snapshots(
@@ -524,17 +540,16 @@ def build_worker_request(*, shard: WorkShard, code: str) -> dict[str, Any]:
     if not isinstance(shard, WorkShard):
         raise TypeError("shard must be a WorkShard")
     code_text = _require_text("code", code, allow_empty=True)
-    prelude = "\n".join(
-        (
-            f"__worker_id__ = {json.dumps(shard.worker_id, ensure_ascii=True)}",
-            f"__shard_id__ = {json.dumps(shard.shard_id, ensure_ascii=True)}",
-            f"__shard_index__ = {shard.index}",
-            f"__shard_items__ = {canonical_json(list(shard.items))}",
-            f"__shard_item_count__ = {shard.item_count}",
-            "",
-        )
+    bindings = json_compatible_value(
+        {
+            "__worker_id__": shard.worker_id,
+            "__shard_id__": shard.shard_id,
+            "__shard_index__": shard.index,
+            "__shard_items__": list(shard.items),
+            "__shard_item_count__": shard.item_count,
+        }
     )
-    return {"id": shard.shard_id, "code": prelude + code_text}
+    return {"id": shard.shard_id, "code": code_text, "bindings": bindings}
 
 
 def parse_worker_response(line: str) -> dict[str, Any]:
@@ -691,7 +706,14 @@ def _validate_response_id(request: Mapping[str, Any], response: Mapping[str, Any
 def _response_payload(response: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
-    return parse_worker_response(canonical_json(dict(response)))
+    payload = json_compatible_value(dict(response))
+    if type(payload.get("ok")) is not bool:
+        raise WorkerProtocolError("worker response field ok must be a boolean")
+    if payload["ok"] and "result" not in payload:
+        raise WorkerProtocolError("successful worker response missing result")
+    if not payload["ok"] and not isinstance(payload.get("error"), dict):
+        raise WorkerProtocolError("failed worker response missing error object")
+    return payload
 
 
 def _success_payload(response: Mapping[str, Any]) -> dict[str, Any]:

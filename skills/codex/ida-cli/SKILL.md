@@ -10,16 +10,27 @@ The runtime is AI-only: one target argument, stdin JSONL requests, stdout JSONL
 responses, unrestricted Python execution, persistent globals, and artifact-
 backed large outputs.
 
+The supported IDA surface is `IDA Pro 9.0+` simple-open idalib workflows. This
+skill does not expose the extra loader-argument variants that IDA 9.1/9.2 added
+to `open_database()`.
+
 ## Install Runtime
 
 From the repository root:
 
 ```powershell
+cd <IDA_ROOT>\idalib\python
+python -m pip install idapro
+python py-activate-idalib.py
+
+cd <IDA_CLI_REPO>
 python -m pip install -e .
 ```
 
-The runtime auto-discovers `IDADIR` and the common Windows install
-`D:\IDA\idalib\python`.
+IDA-CLI probes an already importable `idapro` first. If that official setup was
+skipped, the runtime next checks `IDADIR` and bounded Windows install layouts.
+Full-drive discovery is slow and off by default; opt into it with
+`IDA_CLI_DEEP_IDA_DISCOVERY=1` only as a last resort.
 
 ## Agent Bridge
 
@@ -28,8 +39,8 @@ Prefer the importable bridge for Codex tool runs:
 ```python
 from ida_cli.agent_bridge import AgentSession
 
-with AgentSession.start(r"D:\samples\target.i64", require_ida=True) as ida:
-    backend = ida.backend
+with AgentSession.start("path/to/target.i64", require_ida=True) as ida:
+    backend = ida.probe_backend(require_ida=True)
     funcs = ida.result("__result__ = ai.functions()", request_id="inventory.functions")
 ```
 
@@ -110,7 +121,9 @@ Triage helpers:
 
 Mutation helpers:
 `rename`, `set_comment`, `set_repeatable_comment`, `set_nonrepeatable_comment`,
-`apply_type`, `patch_bytes`, `patch_byte`, `save_database`.
+`apply_type`, `patch_bytes`, `patch_byte`, `save_database`, `propose_rename`,
+`propose_comment`, `propose_type`, `propose_patch_bytes`,
+`propose_save_database`.
 
 Cache helpers:
 `refresh_cache`, `cache_status`, `cached_functions`,

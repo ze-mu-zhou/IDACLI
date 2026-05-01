@@ -43,12 +43,27 @@ FAKE_WORKER = textwrap.dedent(
     globals_dict = {"__database_path__": database_path}
     for line in sys.stdin:
         request = json.loads(line)
+        bindings = request.get("bindings", {})
+        previous = {}
+        missing = []
         stdout = io.StringIO()
         stderr = io.StringIO()
         started = time.perf_counter_ns()
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                exec(request["code"], globals_dict, globals_dict)
+                for name, value in bindings.items():
+                    if name in globals_dict:
+                        previous[name] = globals_dict[name]
+                    else:
+                        missing.append(name)
+                    globals_dict[name] = value
+                try:
+                    exec(request["code"], globals_dict, globals_dict)
+                finally:
+                    for name, value in previous.items():
+                        globals_dict[name] = value
+                    for name in missing:
+                        globals_dict.pop(name, None)
             response = {
                 "elapsed_ms": max(0, (time.perf_counter_ns() - started) // 1_000_000),
                 "ok": True,
@@ -198,7 +213,8 @@ class ParallelRunnerTests(unittest.TestCase):
         plan = make_fanout_plan(target_path="target.i64", items=[1], worker_count=1)
         request = build_worker_request(shard=plan.shards[0], code="__result__ = 3")
         self.assertEqual(request["id"], "shard-000")
-        self.assertIn("__shard_items__ = [1]", request["code"])
+        self.assertEqual(request["code"], "__result__ = 3")
+        self.assertEqual(request["bindings"]["__shard_items__"], [1])
 
     def test_worker_response_to_result_preserves_captured_streams(self) -> None:
         plan = make_fanout_plan(target_path="target.i64", items=[1], worker_count=1)

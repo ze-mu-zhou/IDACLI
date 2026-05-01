@@ -51,6 +51,7 @@ class PythonRuntime:
         *,
         request_id: Any | None = None,
         has_request_id: bool | None = None,
+        bindings: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one unrestricted request; when editing this, keep capture process-local."""
         include_id = request_id is not None if has_request_id is None else has_request_id
@@ -68,10 +69,12 @@ class PythonRuntime:
         stderr = io.StringIO()
         start_ns = time.perf_counter_ns()
         try:
+            request_bindings = _request_bindings(bindings)
             compiled = compile(code, REQUEST_FILENAME, "exec")
             self.globals.pop("__result__", None)
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                exec(compiled, self.globals, self.globals)
+                with _RequestBindings(self.globals, request_bindings):
+                    exec(compiled, self.globals, self.globals)
         except Exception as exc:
             elapsed_ms = _elapsed_ms(start_ns)
             return self._error_response(
@@ -115,9 +118,15 @@ class PythonRuntime:
                 request.code,
                 request_id=request.request_id,
                 has_request_id=bool(request.has_id),
+                bindings=getattr(request, "bindings", {}),
             )
         request_id = request.get("id")
-        return self.execute(request.get("code"), request_id=request_id, has_request_id="id" in request)
+        return self.execute(
+            request.get("code"),
+            request_id=request_id,
+            has_request_id="id" in request,
+            bindings=request.get("bindings"),
+        )
 
     @staticmethod
     def _error_response(
@@ -139,6 +148,31 @@ class PythonRuntime:
         if include_id:
             response["id"] = request_id
         return response
+
+
+class _RequestBindings:
+    """Inject request-scoped globals without leaking them into later requests."""
+
+    def __init__(self, runtime_globals: dict[str, Any], bindings: Mapping[str, Any]) -> None:
+        self._runtime_globals = runtime_globals
+        self._bindings = bindings
+        self._previous: dict[str, Any] = {}
+        self._missing: set[str] = set()
+
+    def __enter__(self) -> "_RequestBindings":
+        for name, value in self._bindings.items():
+            if name in self._runtime_globals:
+                self._previous[name] = self._runtime_globals[name]
+            else:
+                self._missing.add(name)
+            self._runtime_globals[name] = value
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        for name, value in self._previous.items():
+            self._runtime_globals[name] = value
+        for name in self._missing:
+            self._runtime_globals.pop(name, None)
 
 
 def prepare_result(value: Any) -> Any:
@@ -239,6 +273,20 @@ def _safe_repr(value: Any) -> str:
 def _elapsed_ms(start_ns: int) -> int:
     """Measure request latency; when changing, keep response units in milliseconds."""
     return (time.perf_counter_ns() - start_ns) // 1_000_000
+
+
+def _request_bindings(bindings: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Validate optional request-scoped globals without widening the protocol."""
+    if bindings is None:
+        return {}
+    if not isinstance(bindings, Mapping):
+        raise RuntimeRequestError("request bindings must be a mapping")
+    normalized: dict[str, Any] = {}
+    for name, value in bindings.items():
+        if not isinstance(name, str):
+            raise RuntimeRequestError("request binding names must be strings")
+        normalized[name] = value
+    return normalized
 
 
 __all__ = (

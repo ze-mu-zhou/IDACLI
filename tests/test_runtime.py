@@ -117,6 +117,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(response["id"], "map-1")
         self.assertEqual(response["result"], 7)
 
+    def test_request_bindings_are_scoped_to_one_request(self) -> None:
+        """Per-request globals must not leak once the request finishes."""
+        runtime = PythonRuntime(initial_globals={"__worker_id__": "persistent"})
+
+        first = runtime.execute_request(
+            {
+                "id": "bind-1",
+                "code": "__result__ = (__worker_id__, tuple(__shard_items__))",
+                "bindings": {"__worker_id__": "worker-007", "__shard_items__": [1, 2, 3]},
+            }
+        )
+        second = runtime.execute("__result__ = globals().get('__shard_items__', 'missing'), __worker_id__")
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["result"], ["worker-007", [1, 2, 3]])
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["result"], ["missing", "persistent"])
+
     def test_bad_request_code_returns_structured_error(self) -> None:
         """Invalid request source fails the request instead of guessing behavior."""
         runtime = PythonRuntime()
@@ -125,6 +143,16 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertFalse(response["ok"])
         self.assertEqual(response["id"], "bad-code")
+        self.assertEqual(response["error"]["type"], "RuntimeRequestError")
+
+    def test_bad_request_bindings_return_structured_error(self) -> None:
+        """Malformed binding envelopes must fail the request instead of leaking state."""
+        runtime = PythonRuntime()
+
+        response = runtime.execute_request({"id": "bad-bindings", "code": "__result__ = 1", "bindings": []})
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["id"], "bad-bindings")
         self.assertEqual(response["error"]["type"], "RuntimeRequestError")
 
     def test_prepare_result_is_strict_json_compatible(self) -> None:

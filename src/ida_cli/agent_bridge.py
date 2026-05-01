@@ -96,11 +96,11 @@ class AgentSession:
 
     def probe_backend(self, *, require_ida: bool = False) -> dict[str, Any]:
         """Fetch backend metadata once and optionally require a real IDA backend."""
-
-        backend = self.result("__result__ = __backend__", request_id="probe.backend")
-        if not isinstance(backend, Mapping):
-            raise AgentBridgeError("backend probe did not return a metadata object")
-        self._backend = dict(backend)
+        if self._backend is None:
+            backend = self.result("__result__ = __backend__", request_id="probe.backend")
+            if not isinstance(backend, Mapping):
+                raise AgentBridgeError("backend probe did not return a metadata object")
+            self._backend = dict(backend)
         if require_ida and self._backend.get("ida_available") is not True:
             raise AgentBridgeError(f"IDA backend required: {self._backend!r}")
         return dict(self._backend)

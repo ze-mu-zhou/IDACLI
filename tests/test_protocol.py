@@ -60,11 +60,18 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertEqual(request.code, "__result__ = 1")
         self.assertFalse(request.has_id)
+        self.assertEqual(request.bindings, {})
         self.assertNotIn("id", response)
         self.assertEqual(
             response,
             {"elapsed_ms": 3, "ok": True, "result": 1, "stderr": "", "stdout": "out"},
         )
+
+    def test_parse_request_preserves_optional_bindings_object(self) -> None:
+        request = parse_request('{"id":"req-1","code":"__result__ = __shard_index__","bindings":{"__shard_index__":7}}')
+
+        self.assertEqual(request.request_id, "req-1")
+        self.assertEqual(request.bindings, {"__shard_index__": 7})
 
     def test_request_id_is_passed_through_exactly_when_present(self) -> None:
         request = parse_request('{"id":{"agent":"worker-1","seq":7},"code":"pass"}')
@@ -130,6 +137,7 @@ class ProtocolTests(unittest.TestCase):
             "[]",
             '{"id":"req"}',
             '{"code":7}',
+            '{"code":"pass","bindings":[]}',
         ]
 
         for line in invalid_lines:

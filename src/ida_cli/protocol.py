@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional, TextIO, Tuple
 
 JsonObject = Dict[str, Any]
@@ -51,6 +51,7 @@ class ProtocolRequest:
     code: str
     request_id: Any = None
     has_id: bool = False
+    bindings: JsonObject = field(default_factory=dict)
 
 
 def parse_request(line: str) -> ProtocolRequest:
@@ -77,8 +78,11 @@ def parse_request(line: str) -> ProtocolRequest:
     code = payload["code"]
     if not isinstance(code, str):
         raise RequestFormatError("request field code must be a string")
+    bindings = payload.get("bindings", {})
+    if not isinstance(bindings, dict):
+        raise RequestFormatError("request field bindings must be a JSON object")
 
-    return ProtocolRequest(code=code, request_id=payload.get("id"), has_id="id" in payload)
+    return ProtocolRequest(code=code, request_id=payload.get("id"), has_id="id" in payload, bindings=bindings)
 
 
 def success_response(

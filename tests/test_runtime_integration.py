@@ -204,6 +204,8 @@ class RuntimeIntegrationTests(unittest.TestCase):
     def test_packaging_skill_and_ai_callable_examples_are_present(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         scripts = pyproject["project"]["scripts"]
+        readme = ROOT / "README.md"
+        ai_install = ROOT / "docs" / "AI_INSTALL.md"
         codex_skill = ROOT / "skills" / "codex" / "ida-cli" / "SKILL.md"
         claude_skill = ROOT / "skills" / "claude" / "ida-cli" / "SKILL.md"
         project_claude_skill = ROOT / ".claude" / "skills" / "ida-cli" / "SKILL.md"
@@ -212,10 +214,40 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
         self.assertEqual(scripts.get("ida-ai"), "ida_cli.__main__:main")
         self.assertEqual(pyproject["project"].get("readme"), "README.md")
+        with self.subTest("readme and ai install guide"):
+            self.assertTrue(readme.is_file(), "README.md must exist")
+            self.assertTrue(ai_install.is_file(), "docs/AI_INSTALL.md must exist")
+            readme_text = readme.read_text(encoding="utf-8").lower()
+            guide_text = ai_install.read_text(encoding="utf-8").lower()
+            for token in (
+                "ida-cli vs ida mcp",
+                "不是",
+                "mcp server",
+                "docs/ai_install.md",
+                "快速开始",
+                "agentsession",
+                "python -m pip install -e .",
+                "python scripts/install_skill.py all --force",
+            ):
+                self.assertIn(token, readme_text)
+            for token in (
+                "install_skill.py",
+                "agentsession",
+                "probe_backend",
+                "ida-ai",
+                "jsonl",
+                "ida pro 9.0+",
+                "py-activate-idalib.py",
+                "ida_cli_deep_ida_discovery=1",
+            ):
+                self.assertIn(token, guide_text)
         with self.subTest("repo skills"):
             for skill in (codex_skill, claude_skill, project_claude_skill):
                 self.assertTrue(skill.is_file(), f"missing distributed skill: {skill}")
-            text = "\n".join(skill.read_text(encoding="utf-8").lower() for skill in (codex_skill, claude_skill))
+            text = "\n".join(
+                skill.read_text(encoding="utf-8").lower()
+                for skill in (codex_skill, claude_skill, project_claude_skill)
+            )
             for token in (
                 "agent_bridge",
                 "jsonl",
@@ -227,8 +259,15 @@ class RuntimeIntegrationTests(unittest.TestCase):
                 "pwn_overview",
                 "focus",
                 "export_inventory",
+                "propose_rename",
             ):
                 self.assertIn(token, text)
+        with self.subTest("portable doc examples"):
+            portable_text = "\n".join((readme_text, guide_text, text))
+            for token in ("path/to/target.i64", "<ida_root>/idalib/python"):
+                self.assertIn(token, portable_text)
+            for forbidden in ("d:\\samples\\target.i64", "d:\\ida\\idalib\\python"):
+                self.assertNotIn(forbidden, portable_text)
         with self.subTest("jsonl request examples"):
             self.assertTrue(request_examples, "examples/*.jsonl must contain AI-callable JSONL requests")
         for example in request_examples:
