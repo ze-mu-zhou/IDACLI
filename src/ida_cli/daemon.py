@@ -25,18 +25,40 @@ _STARTUP_TIMEOUT = 15.0  # seconds
 
 
 def _wsl_to_win_path(linux_path: str) -> str:
-    """Convert a WSL path to Windows UNC path for cross-filesystem access."""
+    """Convert a WSL path to Windows UNC path using wslpath.exe."""
+    # Normalize to forward slashes for detection
+    normalized = linux_path.replace("\\", "/")
     try:
         import subprocess as sp
         result = sp.run(
-            ["wsl.exe", "wslpath", "-w", linux_path],
+            ["wslpath", "-w", normalized],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    # Fallback: /tmp/x -> \\wsl$\Debian\tmp\x (best-effort)
+    if normalized.startswith("/"):
+        distro = _wsl_distro_name()
+        sep = "\\"
+        return f"\\\\wsl$\\{distro}{normalized.replace('/', sep)}"
+    return linux_path
+
+
+def _wsl_distro_name() -> str:
+    """Return the WSL distro name or a safe default."""
+    try:
+        import subprocess as sp
+        result = sp.run(
+            ["wsl.exe", "sh", "-c", "echo $WSL_DISTRO_NAME"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
         pass
-    return linux_path
+    return "Debian"
 
 
 def get_daemon_dir() -> Path:

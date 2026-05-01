@@ -129,16 +129,10 @@ class AgentSession:
             session = cls.connect(target, request_timeout_s=request_timeout_s)
         else:
             argv = tuple(command) if command else (sys.executable, "-B", "-m", "ida_cli")
-            # On WSL, tell daemon to use /tmp/ so both sides find the same files
-            env = None
-            if is_wsl():
-                import os as _os
-                env = dict(_os.environ)
-                env["IDA_CLI_DAEMON_DIR"] = "/tmp/.ida-cli/daemons"
+            # Daemon auto-detects WSL via WSLENV and uses /tmp/.ida-cli/
             subprocess.Popen(
                 (*argv, "--daemon", target),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=env,
             )
             deadline = _time.monotonic() + _DAEMON_STARTUP_TIMEOUT
             while not is_daemon_running(target):
