@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import TextIO
 
+from .daemon import DaemonServer, is_daemon_running
 from .kernel import create_session
 from .protocol import (
     BadJsonError,
@@ -18,26 +20,88 @@ from .protocol import (
 
 
 def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
-    """Run `ida-ai target` as a long-lived JSONL Python kernel."""
+    """Run `ida-ai [--daemon] target` as a long-lived JSONL Python kernel."""
     args = list(sys.argv[1:] if argv is None else argv)
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
+
+    daemon_mode = False
+    if args and args[0] == "--daemon":
+        daemon_mode = True
+        args.pop(0)
+    if args and args[0] == "--shutdown":
+        _shutdown_daemon(args[1] if len(args) > 1 else None, output_stream)
+        return 0
+
     if len(args) != 1:
         write_jsonl(
             output_stream,
-            _startup_error("CLIArgumentError", "expected exactly one target path"),
+            _startup_error("CLIArgumentError", "expected exactly one target path (or --daemon target)"),
         )
         return 2
+
+    target = args[0]
+
+    if daemon_mode and is_daemon_running(target):
+        write_jsonl(
+            output_stream,
+            _startup_error("DaemonRunningError", f"Daemon already running for {target!r}"),
+        )
+        return 1
+
     try:
-        session = create_session(args[0])
+        session = create_session(target)
     except Exception as exc:
         write_jsonl(output_stream, _startup_exception(exc))
         return 1
 
     try:
+        if daemon_mode:
+            return _serve_daemon(target, session)
         return _serve(session.runtime, input_stream, output_stream)
     finally:
+        if not daemon_mode:
+            session.close()
+
+
+def _serve_daemon(target: str, session: object) -> int:
+    """Run kernel as a daemon, accepting client connections on a Unix socket."""
+    server = DaemonServer(target, session.runtime)
+    try:
+        server.start()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
         session.close()
+    return 0
+
+
+def _shutdown_daemon(target: str | None, output_stream: TextIO) -> None:
+    """Shut down a running daemon and clean up its files."""
+    from .daemon import _cleanup_daemon_files, get_pid_path
+
+    if target is None:
+        write_jsonl(
+            output_stream,
+            _startup_error("CLIArgumentError", "--shutdown requires a target path"),
+        )
+        return
+    if not is_daemon_running(target):
+        write_jsonl(
+            output_stream,
+            _startup_error("NoDaemonError", f"No daemon running for {target!r}"),
+        )
+        return
+    try:
+        pid = int(open(get_pid_path(target)).read().strip())
+        os.kill(pid, 15)  # SIGTERM
+        write_jsonl(output_stream, {"ok": True, "message": f"Sent SIGTERM to daemon PID {pid}"})
+    except OSError as exc:
+        write_jsonl(output_stream, _startup_exception(exc))
+    finally:
+        _cleanup_daemon_files(target)
 
 def _serve(runtime: object, stdin: TextIO, stdout: TextIO) -> int:
     """Process JSONL requests until EOF, skipping malformed lines."""
