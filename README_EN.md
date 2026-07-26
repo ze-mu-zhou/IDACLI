@@ -12,7 +12,7 @@ Give your AI agent unrestricted, persistent, low-latency access to a real IDA da
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 > [!IMPORTANT]
-> This project is built for AI agents. We strongly recommend letting your agent (Claude Code / Codex) handle the installation and setup instead of doing it manually.
+> This project is built for AI agents. We strongly recommend letting your agent (Kimi Code / Codex) handle the installation and setup instead of doing it manually.
 > 👉 [AI Installation Guide](docs/AI_INSTALL.md)
 
 **[中文文档](README.md)**
@@ -76,7 +76,7 @@ with AgentSession.start("target.i64", require_ida=True) as ida:
 ```
 
 ### Multi-Agent Skill Distribution
-Ships ready-to-install skills for **Claude Code**, **Codex**, and **OpenAI Agents** — one `install_skill.py` command and the agent knows how to drive IDA.
+Ships ready-to-install skills for **Kimi Code**, **Codex**, and **OpenAI Agents** — one `install_skill.py` command and the agent knows how to drive IDA.
 
 ## Quick Start
 
@@ -101,7 +101,7 @@ python -m pip install -e .
 python scripts/install_skill.py all --force
 
 # Or pick one
-python scripts/install_skill.py claude --force
+python scripts/install_skill.py kimi --force
 python scripts/install_skill.py codex --force
 ```
 
@@ -123,13 +123,45 @@ ida-ai path/to/target.i64
 {"id":"funcs","code":"__result__ = ai.inventory_summary()"}
 ```
 
+## Daemon Mode (Persistent Kernel Across Sessions)
+
+By default each `ida-ai <target>` launches a fresh kernel. Daemon mode keeps one IDA kernel alive across sessions: clients connect and disconnect over TCP while the database, globals, and caches are reused — no repeated IDA auto-analysis or cache rebuilds per session.
+
+```bash
+# Start (or reuse) the daemon for a target
+ida-ai --daemon path/to/target.i64
+
+# Stop the daemon for a target
+ida-ai --shutdown path/to/target.i64
+```
+
+From Python, `AgentSession` handles it:
+
+```python
+from ida_cli.agent_bridge import AgentSession
+
+# Spawn the daemon if needed, otherwise reuse the running one
+with AgentSession.start("target.i64", daemon=True, require_ida=True) as ida:
+    ...
+
+# Attach to an already-running daemon
+with AgentSession.connect("target.i64") as ida:
+    ...
+```
+
+Security model:
+
+- Binds `127.0.0.1` (loopback) only by default. Setting `IDA_CLI_DAEMON_HOST=0.0.0.0` opts into all interfaces (needed for some WSL↔Windows setups) and prints a startup warning.
+- Each daemon generates a random auth token at startup, written next to the pid/port files in the daemon directory (`~/.ida-cli/daemons/`, or `/tmp/.ida-cli/daemons` under WSL; override with `IDA_CLI_DAEMON_DIR`) with owner-only permissions.
+- Clients must authenticate with this token before any request is served; `AgentSession` / `DaemonClient` do this automatically.
+
 ## Architecture
 
 ```
 ┌──────────────┐     stdin (JSONL)      ┌──────────────────┐
 │   AI Agent   │ ──────────────────────▶ │                  │
 │              │                         │   ida-ai kernel  │
-│  Claude Code │ ◀────────────────────── │                  │
+│  Kimi Code   │ ◀────────────────────── │                  │
 │  Codex       │     stdout (JSONL)      │  ┌────────────┐  │
 │  OpenAI      │                         │  │  IDAPython  │  │
 └──────────────┘                         │  │  + idalib   │  │
@@ -171,19 +203,22 @@ IDA-CLI is **not** an MCP server. Choose based on your agent's capabilities:
 
 ```
 src/ida_cli/
+├── __init__.py          # Package marker
 ├── __main__.py          # Entry point (ida-ai CLI)
 ├── kernel.py            # JSONL kernel loop
 ├── runtime.py           # Python execution runtime
 ├── protocol.py          # JSONL encode/decode
 ├── ai_helpers.py        # 40+ AI convenience helpers
 ├── agent_bridge.py      # AgentSession for external agents
+├── daemon.py            # Persistent cross-session kernel daemon (TCP)
 ├── cache.py             # Persistent index cache
 ├── mutations.py         # Database mutation helpers
 ├── conflicts.py         # Deterministic conflict merging
 ├── artifacts.py         # Large-result file writer
 ├── parallel_runner.py   # Multi-kernel parallel execution
 ├── supervisor.py        # Work fanout planning
-└── worker_pool.py       # Isolated worker management
+├── worker_pool.py       # Isolated worker management
+└── wsl.py               # WSL path conversion and Python detection
 ```
 
 ## Documentation

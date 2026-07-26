@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 > [!IMPORTANT]
-> 本项目专为 AI Agent 设计。强烈建议让你的 Agent（Claude Code / Codex）自行完成安装和配置，而非手动操作。
+> 本项目专为 AI Agent 设计。强烈建议让你的 Agent（Kimi Code / Codex）自行完成安装和配置，而非手动操作。
 > 👉 [AI 安装指南](docs/AI_INSTALL.md)
 
 **[English](README_EN.md)**
@@ -76,7 +76,7 @@ with AgentSession.start("target.i64", require_ida=True) as ida:
 ```
 
 ### 多 Agent Skill 分发
-内置 **Claude Code**、**Codex**、**OpenAI Agents** 的 skill 文件 — 一条 `install_skill.py` 命令，Agent 即刻学会驱动 IDA。
+内置 **Kimi Code**、**Codex**、**OpenAI Agents** 的 skill 文件 — 一条 `install_skill.py` 命令，Agent 即刻学会驱动 IDA。
 
 ## 快速开始
 
@@ -101,7 +101,7 @@ python -m pip install -e .
 python scripts/install_skill.py all --force
 
 # 或者只装一个
-python scripts/install_skill.py claude --force
+python scripts/install_skill.py kimi --force
 python scripts/install_skill.py codex --force
 ```
 
@@ -123,13 +123,45 @@ ida-ai path/to/target.i64
 {"id":"funcs","code":"__result__ = ai.inventory_summary()"}
 ```
 
+## Daemon 模式（跨会话常驻内核）
+
+默认每次 `ida-ai <target>` 都启动一个新内核。Daemon 模式让同一个 IDA 内核跨会话常驻，客户端通过 TCP 连接/断开，数据库、全局变量和缓存全部复用 — 不必为每个会话重复支付 IDA 自动分析和缓存重建的开销。
+
+```bash
+# 启动（或复用）某个目标的 daemon
+ida-ai --daemon path/to/target.i64
+
+# 停止该目标的 daemon
+ida-ai --shutdown path/to/target.i64
+```
+
+Python 侧由 `AgentSession` 自动处理：
+
+```python
+from ida_cli.agent_bridge import AgentSession
+
+# 没有 daemon 则启动一个，已有则直接复用
+with AgentSession.start("target.i64", daemon=True, require_ida=True) as ida:
+    ...
+
+# 挂载到已在运行的 daemon
+with AgentSession.connect("target.i64") as ida:
+    ...
+```
+
+安全模型：
+
+- 默认只绑定 `127.0.0.1`（loopback）。设置 `IDA_CLI_DAEMON_HOST=0.0.0.0` 才会绑定所有网卡（部分 WSL↔Windows 互联场景需要），启动时会打印警告。
+- 每个 daemon 启动时生成随机认证 token，与 pid/port 文件一起写入 daemon 目录（`~/.ida-cli/daemons/`，WSL 下为 `/tmp/.ida-cli/daemons`，可用 `IDA_CLI_DAEMON_DIR` 覆盖），文件权限为仅属主可读写。
+- 客户端连接后必须先通过 token 认证才会处理请求；`AgentSession` / `DaemonClient` 会自动完成认证。
+
 ## 架构
 
 ```
 ┌──────────────┐     stdin (JSONL)      ┌──────────────────┐
 │   AI Agent   │ ──────────────────────▶ │                  │
 │              │                         │   ida-ai kernel  │
-│  Claude Code │ ◀────────────────────── │                  │
+│  Kimi Code   │ ◀────────────────────── │                  │
 │  Codex       │     stdout (JSONL)      │  ┌────────────┐  │
 │  OpenAI      │                         │  │  IDAPython  │  │
 └──────────────┘                         │  │  + idalib   │  │
@@ -171,19 +203,22 @@ IDA-CLI **不是** MCP server。根据你的 Agent 能力选择：
 
 ```
 src/ida_cli/
+├── __init__.py          # 包标识
 ├── __main__.py          # 入口（ida-ai CLI）
 ├── kernel.py            # JSONL 内核循环
 ├── runtime.py           # Python 执行运行时
 ├── protocol.py          # JSONL 编解码
 ├── ai_helpers.py        # 40+ AI 辅助函数
 ├── agent_bridge.py      # AgentSession 外部 Agent 桥接
+├── daemon.py            # 跨会话常驻内核守护进程（TCP）
 ├── cache.py             # 持久索引缓存
 ├── mutations.py         # 数据库变更辅助
 ├── conflicts.py         # 确定性冲突合并
 ├── artifacts.py         # 大结果文件写入
 ├── parallel_runner.py   # 多内核并行执行
 ├── supervisor.py        # 工作扇出规划
-└── worker_pool.py       # 隔离 Worker 管理
+├── worker_pool.py       # 隔离 Worker 管理
+└── wsl.py               # WSL 路径转换与 Python 探测
 ```
 
 ## 文档

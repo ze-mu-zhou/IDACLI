@@ -51,13 +51,13 @@ Install only one flavor:
 
 ```text
 python scripts/install_skill.py codex --force
-python scripts/install_skill.py claude --force
+python scripts/install_skill.py kimi --force
 ```
 
 Default locations:
 
 - Codex: `%CODEX_HOME%\skills\ida-cli` or `~/.codex/skills/ida-cli`
-- Claude Code: `~/.claude/skills/ida-cli`
+- Kimi Code: `%KIMI_CODE_HOME%\skills\ida-cli` or `~/.kimi-code/skills/ida-cli`
 
 The `ida-cli` Python package provides `ida-ai` and `AgentSession`. The skill
 markdown and agent descriptors still come from this repository or a copied
