@@ -163,10 +163,11 @@ def _normalize_target_path(path: str) -> str:
 
     WSL /mnt/d/... paths map to the Windows D:\\... form (they are not valid
     local paths, so they are returned before filesystem resolution), and
-    paths already in Windows drive form pass through unchanged — resolve()
-    would mangle them into cwd-relative nonsense on POSIX hosts. Every other
-    spelling is resolved to an absolute path so that relative and absolute
-    references to the same target hash identically.
+    paths already in Windows drive form pass through unchanged on POSIX
+    hosts — resolve() there would mangle them into cwd-relative nonsense,
+    while on Windows resolve() is exactly what canonicalizes 8.3/case
+    spellings. Every other spelling is resolved to an absolute path so that
+    relative and absolute references to the same target hash identically.
     """
     p = path.replace("\\", "/")
     if p.startswith("/mnt/") and len(p) > 6:
@@ -174,8 +175,8 @@ def _normalize_target_path(path: str) -> str:
         tail = p[7:]
         sep = "\\"
         return f"{drive}:{sep}{tail.replace('/', sep)}"
-    if len(p) >= 3 and p[0].isalpha() and p[1] == ":" and p[2] == "/":
-        return path  # already Windows absolute form
+    if os.name != "nt" and len(p) >= 3 and p[0].isalpha() and p[1] == ":" and p[2] == "/":
+        return path  # Windows absolute form on a POSIX host; resolve() would mangle it
     return str(Path(path).expanduser().resolve())
 
 
