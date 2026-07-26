@@ -162,9 +162,11 @@ def _normalize_target_path(path: str) -> str:
     """Canonicalize a target path so all spellings share one daemon identity.
 
     WSL /mnt/d/... paths map to the Windows D:\\... form (they are not valid
-    local paths, so they are returned before filesystem resolution); every
-    other spelling is resolved to an absolute path so that relative and
-    absolute references to the same target hash identically.
+    local paths, so they are returned before filesystem resolution), and
+    paths already in Windows drive form pass through unchanged — resolve()
+    would mangle them into cwd-relative nonsense on POSIX hosts. Every other
+    spelling is resolved to an absolute path so that relative and absolute
+    references to the same target hash identically.
     """
     p = path.replace("\\", "/")
     if p.startswith("/mnt/") and len(p) > 6:
@@ -172,6 +174,8 @@ def _normalize_target_path(path: str) -> str:
         tail = p[7:]
         sep = "\\"
         return f"{drive}:{sep}{tail.replace('/', sep)}"
+    if len(p) >= 3 and p[0].isalpha() and p[1] == ":" and p[2] == "/":
+        return path  # already Windows absolute form
     return str(Path(path).expanduser().resolve())
 
 

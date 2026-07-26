@@ -329,8 +329,14 @@ class DaemonServerTests(unittest.TestCase):
 
 
 class DaemonDirTests(unittest.TestCase):
-    """Verify the WSL shared-dir guess degrades gracefully off real WSL."""
+    """Verify the WSL shared-dir guess degrades gracefully off real WSL.
 
+    These scenarios exercise the \\\\wsl$ UNC fallback, which only exists on
+    Windows; on POSIX a set WSLENV legitimately means "inside WSL", where the
+    shared /tmp dir is the correct answer.
+    """
+
+    @unittest.skipUnless(os.name == "nt", "\\\\wsl$ fallback is Windows-only")
     def test_unreachable_wsl_daemon_dir_falls_back_to_default(self) -> None:
         with mock.patch.dict(os.environ, {"WSLENV": "WT_SESSION:"}):
             os.environ.pop("IDA_CLI_DAEMON_DIR", None)
@@ -345,6 +351,7 @@ class DaemonDirTests(unittest.TestCase):
         self.assertEqual(path, Path("~/.ida-cli/daemons").expanduser())
         self.assertTrue(path.is_dir())
 
+    @unittest.skipUnless(os.name == "nt", "\\\\wsl$ fallback is Windows-only")
     def test_unreachable_wsl_share_skips_wsl_subprocesses(self) -> None:
         with mock.patch.dict(os.environ, {"WSLENV": "WT_SESSION:"}):
             os.environ.pop("IDA_CLI_DAEMON_DIR", None)
