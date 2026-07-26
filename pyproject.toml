@@ -8,7 +8,23 @@ version = "0.1.0"
 description = "AI-only unrestricted pure CLI IDA Python runtime"
 readme = "README.md"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "ida-cli contributors"},
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Disassemblers",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ze-mu-zhou/IDACLI"
+Repository = "https://github.com/ze-mu-zhou/IDACLI"
 
 [project.scripts]
 ida-ai = "ida_cli.__main__:main"

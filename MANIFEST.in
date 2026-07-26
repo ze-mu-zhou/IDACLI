@@ -1,0 +1,2 @@
+# Keep sdists self-contained enough to run the test suite from a tarball.
+recursive-include tests *.py
