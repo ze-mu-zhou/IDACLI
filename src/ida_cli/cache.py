@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
 import os
 import time
@@ -15,6 +16,8 @@ from typing import Any
 _EXPORT_SCHEMA = "ida-cli-cache-index-v1"
 _EXPORT_VERSION = 1
 _PERSIST_KIND = "ida-cli-cache-persistent-v1"
+_BADADDR = (1 << 64) - 1
+_FINGERPRINT_KEYS = ("root_filename", "input_md5")
 
 
 class CacheError(RuntimeError):
@@ -224,6 +227,7 @@ class IDACache:
 
         payload = {
             "kind": _PERSIST_KIND,
+            "fingerprint": _database_fingerprint(self._provider),
             "payload": self.export(),
         }
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode(
@@ -240,8 +244,14 @@ class IDACache:
             raise
         return {"path": str(target), "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
-    def load_persistent(self, path: str | os.PathLike[str]) -> dict[str, Any]:
-        """Load a previously persisted cache snapshot without querying IDA."""
+    def load_persistent(self, path: str | os.PathLike[str], *, force: bool = False) -> dict[str, Any]:
+        """Load a previously persisted cache snapshot without querying IDA.
+
+        Snapshots carry a best-effort database fingerprint; a mismatch is
+        refused unless ``force=True``. When either side lacks fingerprint
+        data the load is allowed, and legacy envelopes without a fingerprint
+        key keep loading.
+        """
 
         target = _persistent_path(path)
         data = target.read_bytes()
@@ -249,13 +259,30 @@ class IDACache:
             wrapper = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CacheError(f"persistent cache is not valid JSON: {target}") from exc
-        self._load_export(_persistent_payload(wrapper))
+        payload = _persistent_payload(wrapper)
+        self._check_fingerprint(wrapper.get("fingerprint"), force=force)
+        self._load_export(payload)
         return {
             "path": str(target),
             "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "status": self.status(),
         }
+
+    def _check_fingerprint(self, stored: Any, *, force: bool) -> None:
+        """Refuse snapshots captured from a different database unless forced."""
+
+        if force or stored is None:
+            return
+        saved = _normalize_fingerprint(stored)
+        current = _database_fingerprint(self._provider)
+        mismatched = [
+            key
+            for key in _FINGERPRINT_KEYS
+            if saved.get(key) is not None and current.get(key) is not None and saved[key] != current[key]
+        ]
+        if mismatched:
+            raise CacheError(f"persistent cache database fingerprint mismatch: {', '.join(mismatched)}")
 
     def _ensure_fresh(self) -> None:
         """Reject reads from stale indexes instead of refreshing silently."""
@@ -388,23 +415,31 @@ class IDACache:
         if isinstance(ea_or_name, bool):
             raise CacheError("boolean values are not valid addresses")
         if isinstance(ea_or_name, int):
-            if ea_or_name < 0:
-                raise CacheError(f"invalid effective address: {ea_or_name!r}")
-            return ea_or_name
+            return self._checked_ea(ea_or_name)
         if not isinstance(ea_or_name, str):
             raise CacheError(f"unsupported address type: {type(ea_or_name).__name__}")
         text = ea_or_name.strip()
         if not text:
             raise CacheError("empty address/name cannot be resolved")
+        value: int | None = None
         try:
             value = int(text, 0)
         except ValueError:
-            if text not in self._name_to_address:
-                raise CacheError(f"name is not present in refreshed cache: {text!r}")
-            return self._name_to_address[text]
-        if value < 0:
-            raise CacheError(f"invalid effective address: {value!r}")
-        return value
+            try:
+                # Accept leading-zero decimals; future changes must keep name lookup as the final fallback.
+                value = int(text, 10)
+            except ValueError:
+                if text not in self._name_to_address:
+                    raise CacheError(f"name is not present in refreshed cache: {text!r}")
+                return self._checked_ea(self._name_to_address[text])
+        return self._checked_ea(value)
+
+    def _checked_ea(self, ea: int) -> int:
+        """Reject negative and BADADDR-sentinel addresses like sibling resolvers."""
+
+        if ea < 0 or ea == _BADADDR:
+            raise CacheError(f"invalid effective address: {ea!r}")
+        return ea
 
     def _function_for_ea(self, ea: int) -> dict[str, Any] | None:
         """Find the cached function range containing an effective address."""
@@ -430,12 +465,50 @@ def create_cache(provider: Any) -> IDACache:
     return IDACache(provider)
 
 
-def load_persistent_cache(provider: Any, path: str | os.PathLike[str]) -> IDACache:
+def load_persistent_cache(provider: Any, path: str | os.PathLike[str], *, force: bool = False) -> IDACache:
     """Create a cache and hydrate it from a persistent snapshot."""
 
     cache = IDACache(provider)
-    cache.load_persistent(path)
+    cache.load_persistent(path, force=force)
     return cache
+
+
+def _database_fingerprint(provider: Any) -> dict[str, Any]:
+    """Return a best-effort fingerprint of the database behind a provider."""
+
+    # Prefer provider-reported identity; future changes must stay None-safe without IDA modules.
+    hook = getattr(provider, "fingerprint", None)
+    if callable(hook):
+        return _normalize_fingerprint(hook())
+    return {
+        "root_filename": _optional_ida_value("ida_nalt", "get_root_filename"),
+        "input_md5": _optional_ida_value("idc", "get_input_md5"),
+    }
+
+
+def _optional_ida_value(module_name: str, attr: str) -> str | None:
+    """Return one IDA module string attribute, or None when unavailable."""
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        return None
+    getter = getattr(module, attr, None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    return None if value is None else str(value)
+
+
+def _normalize_fingerprint(value: Any) -> dict[str, Any]:
+    """Return a JSON-safe fingerprint dict with optional string fields."""
+
+    if not isinstance(value, Mapping):
+        raise CacheError("persistent cache fingerprint must be an object")
+    return {key: None if value.get(key) is None else str(value.get(key)) for key in _FINGERPRINT_KEYS}
 
 
 def _records(value: Any, label: str) -> list[Any]:

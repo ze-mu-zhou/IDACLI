@@ -22,7 +22,7 @@ __all__ = (
 
 
 class BadJsonError(ValueError):
-    """Report malformed JSONL input. When modifying this, obey fail-fast parse handling."""
+    """Report malformed JSONL input. The serving loop emits one error envelope per bad line and continues."""
 
     def __init__(self, message: str, line: int, column: int, position: int) -> None:
         super().__init__(message)
@@ -34,6 +34,12 @@ class BadJsonError(ValueError):
 
 class RequestFormatError(ValueError):
     """Report decoded requests with invalid protocol shape. When changing this, obey the ida-cli skill."""
+
+    def __init__(self, message: str, *, request_id: Any = None, has_id: bool = False) -> None:
+        """Carry the parsed request id so error envelopes stay correlatable."""
+        super().__init__(message)
+        self.request_id = request_id
+        self.has_id = has_id
 
 
 class _DuplicateKeyError(ValueError):
@@ -72,15 +78,19 @@ def parse_request(line: str) -> ProtocolRequest:
 
     if not isinstance(payload, dict):
         raise RequestFormatError("request must be a JSON object")
+    has_id = "id" in payload
+    request_id = payload.get("id")
     if "code" not in payload:
-        raise RequestFormatError("request missing required field: code")
+        raise RequestFormatError("request missing required field: code", request_id=request_id, has_id=has_id)
 
     code = payload["code"]
     if not isinstance(code, str):
-        raise RequestFormatError("request field code must be a string")
+        raise RequestFormatError("request field code must be a string", request_id=request_id, has_id=has_id)
     bindings = payload.get("bindings", {})
     if not isinstance(bindings, dict):
-        raise RequestFormatError("request field bindings must be a JSON object")
+        raise RequestFormatError(
+            "request field bindings must be a JSON object", request_id=request_id, has_id=has_id
+        )
 
     return ProtocolRequest(code=code, request_id=payload.get("id"), has_id="id" in payload, bindings=bindings)
 
@@ -122,7 +132,7 @@ def error_response(
 
 
 def bad_json_response(error: BadJsonError, *, elapsed_ms: int = 0) -> JsonObject:
-    """Build a bad-JSON envelope. When using this, emit it once and let the caller fail fast."""
+    """Build a bad-JSON envelope. When using this, emit it once per malformed line and keep serving."""
     envelope = error_response(
         None,
         error_type="JSONDecodeError",
@@ -147,8 +157,8 @@ def encode_jsonl(message: JsonObject) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    # json.dumps guarantees single-line output, but Windows Python
-    # can inject \r in text-mode pipes; strip defensively.
+    # json.dumps escapes control characters, so its output can never contain
+    # a raw \r; this strip is a no-op-safe defensive guard, not a real fix-up.
     return raw.replace("\r", "") + "\n"
 
 

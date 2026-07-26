@@ -207,8 +207,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         readme = ROOT / "README.md"
         ai_install = ROOT / "docs" / "AI_INSTALL.md"
         codex_skill = ROOT / "skills" / "codex" / "ida-cli" / "SKILL.md"
-        claude_skill = ROOT / "skills" / "claude" / "ida-cli" / "SKILL.md"
-        project_claude_skill = ROOT / ".claude" / "skills" / "ida-cli" / "SKILL.md"
+        kimi_skill = ROOT / "skills" / "kimi" / "ida-cli" / "SKILL.md"
         examples_dir = ROOT / "examples"
         request_examples = sorted(examples_dir.glob("*.jsonl"))
 
@@ -242,11 +241,11 @@ class RuntimeIntegrationTests(unittest.TestCase):
             ):
                 self.assertIn(token, guide_text)
         with self.subTest("repo skills"):
-            for skill in (codex_skill, claude_skill, project_claude_skill):
+            for skill in (codex_skill, kimi_skill):
                 self.assertTrue(skill.is_file(), f"missing distributed skill: {skill}")
             text = "\n".join(
                 skill.read_text(encoding="utf-8").lower()
-                for skill in (codex_skill, claude_skill, project_claude_skill)
+                for skill in (codex_skill, kimi_skill)
             )
             for token in (
                 "agent_bridge",

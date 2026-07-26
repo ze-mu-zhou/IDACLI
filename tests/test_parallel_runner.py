@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +18,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ida_cli.parallel_runner import (  # noqa: E402
+    DatabaseSnapshotPlan,
     JsonlWorkerProcess,
     LocalParallelRunner,
     WorkerProtocolError,
@@ -91,6 +95,32 @@ def _fake_base_command() -> tuple[str, ...]:
     return (sys.executable, "-u", "-c", FAKE_WORKER)
 
 
+class _InterruptOnceRunner(LocalParallelRunner):
+    """Runner double whose first join wait raises KeyboardInterrupt exactly once."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._interrupt_pending = True
+        self.interrupted_processes: list[subprocess.Popen[str] | None] = []
+
+    def _join_worker_threads(self, threads: tuple[threading.Thread, ...]) -> None:
+        if self._interrupt_pending:
+            self._interrupt_pending = False
+            # Wait until every worker subprocess is up so the kill is observable.
+            deadline = time.monotonic() + 10.0
+            processes: list[subprocess.Popen[str] | None] = []
+            while time.monotonic() < deadline:
+                with self._workers_lock:
+                    workers = list(self._active_workers)
+                processes = [worker._process for worker in workers]
+                if len(processes) == len(self._launch_plans) and all(p is not None for p in processes):
+                    break
+                time.sleep(0.01)
+            self.interrupted_processes = processes
+            raise KeyboardInterrupt
+        super()._join_worker_threads(threads)
+
+
 class ParallelRunnerTests(unittest.TestCase):
     def test_database_snapshot_planning_and_copying_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,11 +132,56 @@ class ParallelRunnerTests(unittest.TestCase):
             manifest = prepare_database_snapshots(plans)
             specs = worker_specs_from_snapshots(plans)
 
-            self.assertEqual([Path(plan.snapshot_path).name for plan in plans], ["sample.worker-000.i64", "sample.worker-001.i64"])
+            names = [Path(plan.snapshot_path).name for plan in plans]
+            self.assertEqual(len(set(names)), 2)
+            for index, name in enumerate(names):
+                self.assertTrue(name.startswith(f"sample.worker-{index:03d}."), name)
+                self.assertTrue(name.endswith(".i64"), name)
+            # One run-unique token is shared within a planning call.
+            self.assertEqual(len({name.split(".")[-2] for name in names}), 1)
             self.assertEqual(manifest.snapshot_count, 2)
             self.assertEqual(manifest.byte_count, len(b"database bytes") * 2)
             self.assertEqual([spec.database_path for spec in specs], [plan.snapshot_path for plan in plans])
             self.assertEqual(Path(plans[0].snapshot_path).read_bytes(), b"database bytes")
+
+    def test_snapshot_names_are_unique_across_planning_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "sample.i64"
+            source.write_bytes(b"database bytes")
+
+            first = plan_database_snapshots(target_path=source, worker_count=2, snapshot_dir=root / "snapshots")
+            second = plan_database_snapshots(target_path=source, worker_count=2, snapshot_dir=root / "snapshots")
+
+        first_names = {Path(plan.snapshot_path).name for plan in first}
+        second_names = {Path(plan.snapshot_path).name for plan in second}
+        self.assertTrue(first_names.isdisjoint(second_names))
+
+    def test_prepare_snapshots_removes_partial_copies_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "present.i64"
+            source.write_bytes(b"database bytes")
+            plans = (
+                DatabaseSnapshotPlan(
+                    worker_id="worker-000",
+                    index=0,
+                    source_path=str(source),
+                    snapshot_path=str(root / "snapshots" / "copy-000.i64"),
+                ),
+                DatabaseSnapshotPlan(
+                    worker_id="worker-001",
+                    index=1,
+                    source_path=str(root / "missing.i64"),
+                    snapshot_path=str(root / "snapshots" / "copy-001.i64"),
+                ),
+            )
+
+            with self.assertRaises(FileNotFoundError):
+                prepare_database_snapshots(plans)
+
+            self.assertFalse((root / "snapshots" / "copy-000.i64").exists())
+            self.assertFalse((root / "snapshots" / "copy-001.i64").exists())
 
     def test_worker_launch_plan_appends_database_path_and_merges_env(self) -> None:
         spec = WorkerSpec.create(
@@ -205,6 +280,33 @@ class ParallelRunnerTests(unittest.TestCase):
         crash = result.results[0].crash.as_dict()
         self.assertEqual(crash["returncode"], -1)
         self.assertIn("timed out", crash["message"])
+
+    def test_keyboard_interrupt_kills_worker_subprocesses(self) -> None:
+        plan = make_fanout_plan(
+            target_path="target.i64",
+            items=[1, 2],
+            worker_count=2,
+            database_paths=("worker0.i64", "worker1.i64"),
+        )
+        command = (
+            sys.executable,
+            "-u",
+            "-c",
+            "import sys, time; sys.stdin.readline(); time.sleep(30)",
+        )
+        launches = plan_worker_launches(plan.worker_specs, base_command=command, cwd=ROOT)
+        runner = _InterruptOnceRunner(launches, timeout_s=25.0)
+
+        started = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(plan, "__result__ = 1")
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 20.0)
+        self.assertEqual(len(runner.interrupted_processes), 2)
+        for process in runner.interrupted_processes:
+            self.assertIsNotNone(process)
+            self.assertIsNotNone(process.poll())
 
     def test_protocol_response_validation_fails_fast(self) -> None:
         with self.assertRaises(WorkerProtocolError):

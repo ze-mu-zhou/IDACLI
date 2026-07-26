@@ -100,15 +100,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("<ida-cli-request>", response["error"]["traceback"])
         self.assertTrue(response["error"]["frames"])
 
-    def test_system_exit_is_not_swallowed(self) -> None:
-        """Explicit Python exits remain available to the future kernel loop."""
+    def test_system_exit_returns_error_envelope_and_session_survives(self) -> None:
+        """sys.exit() becomes a typed error envelope instead of killing the kernel."""
         runtime = PythonRuntime()
 
-        with self.assertRaises(SystemExit):
-            runtime.execute("raise SystemExit(3)")
+        response = runtime.execute("import sys\nsys.exit(3)", request_id="exit-1")
+        follow_up = runtime.execute("__result__ = 42", request_id="exit-2")
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["id"], "exit-1")
+        self.assertEqual(response["error"]["type"], "SystemExit")
+        self.assertIn("3", response["error"]["message"])
+        self.assertTrue(follow_up["ok"])
+        self.assertEqual(follow_up["result"], 42)
+
+    def test_keyboard_interrupt_returns_error_envelope_and_session_survives(self) -> None:
+        """KeyboardInterrupt raised by executed code stays inside its envelope."""
+        runtime = PythonRuntime()
+
+        response = runtime.execute("raise KeyboardInterrupt")
+        follow_up = runtime.execute("__result__ = 'alive'")
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["type"], "KeyboardInterrupt")
+        self.assertTrue(follow_up["ok"])
+        self.assertEqual(follow_up["result"], "alive")
+
+    def test_thread_output_is_not_captured_into_the_request_envelope(self) -> None:
+        """Threads spawned by executed code must not write into capture buffers."""
+        runtime = PythonRuntime()
+
+        response = runtime.execute(
+            "import threading\n"
+            "stray = threading.Thread(target=lambda: print('from-stray-thread'))\n"
+            "stray.start()\n"
+            "stray.join()\n"
+            "print('from-request')\n"
+            "__result__ = 1"
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["stdout"], "from-request\n")
+        self.assertNotIn("from-stray-thread", response["stdout"])
+        self.assertNotIn("from-stray-thread", response["stderr"])
 
     def test_execute_request_uses_protocol_shaped_mapping(self) -> None:
-        """Request mappings pass through IDs while protocol.py is still empty."""
+        """Request mappings pass IDs through the protocol-shaped decode path."""
         runtime = PythonRuntime()
 
         response = runtime.execute_request({"id": "map-1", "code": "__result__ = 7"})

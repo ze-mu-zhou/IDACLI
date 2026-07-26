@@ -150,6 +150,78 @@ class KernelTests(unittest.TestCase):
             with self.assertRaisesRegex(KernelError, "incomplete analysis state"):
                 kernel._wait_for_auto_analysis()
 
+    def test_session_close_swallows_backend_close_failure(self) -> None:
+        """A failing backend close must never escape KernelSession.close()."""
+
+        class CloseFails(PythonOnlyBackend):
+            def close(self) -> None:
+                raise KernelError("close failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = create_session("sample.i64", runs_dir=Path(temp_dir) / "runs", backend=CloseFails())
+            session.close()
+            session.close()
+
+        self.assertTrue(session.closed)
+
+    def test_create_session_cleanup_failure_does_not_mask_primary_error(self) -> None:
+        """A close failure during startup cleanup must not hide the real error."""
+
+        class CloseFails(PythonOnlyBackend):
+            def close(self) -> None:
+                raise KernelError("close failed")
+
+        with mock.patch.object(kernel.ArtifactStore, "create", side_effect=RuntimeError("store broke")):
+            with self.assertRaisesRegex(RuntimeError, "store broke"):
+                create_session("sample.i64", backend=CloseFails())
+
+    def test_open_cleanup_close_failure_does_not_mask_analysis_error(self) -> None:
+        """A close failure after a failed auto-analysis must not hide it."""
+
+        class ExplodingCloseIdaPro(FakeIdaPro):
+            def close_database(self, save_changes: bool) -> None:
+                raise RuntimeError("close exploded")
+
+        backend = IdaLibBackend(ExplodingCloseIdaPro(open_status=0))
+        with mock.patch.object(kernel, "_prepare_idalib_import_path"):
+            with mock.patch.object(kernel, "_wait_for_auto_analysis", side_effect=KernelError("analysis broke")):
+                with self.assertRaisesRegex(KernelError, "analysis broke"):
+                    backend.open("sample.i64")
+
+    def test_idalib_available_checks_importability_without_importing(self) -> None:
+        """available() must answer via find_spec, not a full idapro import."""
+        with mock.patch.object(kernel, "_prepare_idalib_import_path"):
+            with mock.patch.object(kernel, "_idapro_importable", return_value=True):
+                self.assertTrue(IdaLibBackend.available())
+            with mock.patch.object(kernel, "_idapro_importable", return_value=False):
+                self.assertFalse(IdaLibBackend.available())
+
+    @unittest.skipUnless(os.name == "nt", "drive enumeration is Windows-only")
+    def test_local_drive_roots_uses_win32_enumeration(self) -> None:
+        """Windows drive roots come from Win32, not blocking path probes."""
+        with mock.patch.object(kernel, "_win32_fixed_drive_roots", return_value=(Path("C:/"),)) as enum:
+            roots = kernel._local_drive_roots()
+
+        enum.assert_called_once_with()
+        self.assertEqual(roots, (Path("C:/"),))
+
+    @unittest.skipUnless(os.name == "nt", "drive enumeration is Windows-only")
+    def test_local_drive_roots_returns_only_existing_roots(self) -> None:
+        roots = kernel._local_drive_roots()
+
+        self.assertTrue(roots)
+        for root in roots:
+            self.assertTrue(root.exists(), root)
+
+    def test_local_drive_roots_falls_back_to_probing_when_win32_fails(self) -> None:
+        """Any Win32 enumeration failure falls back to safe per-drive probes."""
+        if os.name == "nt":
+            with mock.patch.object(kernel, "_win32_fixed_drive_roots", side_effect=OSError("no win32")):
+                roots = kernel._local_drive_roots()
+        else:
+            roots = kernel._local_drive_roots()
+        self.assertTrue(all(root.exists() for root in roots))
+
 
 if __name__ == "__main__":
     unittest.main()

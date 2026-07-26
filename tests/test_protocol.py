@@ -145,6 +145,20 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaises(RequestFormatError):
                     parse_request(line)
 
+    def test_request_format_error_carries_request_id_when_json_parsed(self) -> None:
+        with self.assertRaises(RequestFormatError) as caught:
+            parse_request('{"id":5,"code":7}')
+
+        self.assertTrue(caught.exception.has_id)
+        self.assertEqual(caught.exception.request_id, 5)
+
+    def test_request_format_error_defaults_to_no_request_id(self) -> None:
+        with self.assertRaises(RequestFormatError) as caught:
+            parse_request("[1, 2]")
+
+        self.assertFalse(caught.exception.has_id)
+        self.assertIsNone(caught.exception.request_id)
+
     def test_parse_request_rejects_duplicate_keys(self) -> None:
         with self.assertRaises(BadJsonError):
             parse_request('{"code":"a","code":"b"}')

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
-import json
-import time
 from collections.abc import Iterable, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -36,6 +33,8 @@ class AIHelpers:
     ) -> None:
         # Keep artifact IO available outside IDA; when changing this, obey path containment checks.
         self._artifact_dir = Path(artifact_dir) if artifact_dir is not None else Path.cwd() / "artifacts"
+        # Bind the store lazily; when changing this, never create directories at import time.
+        self._artifact_store: Any | None = None
         # Keep tests deterministic by allowing injected modules; when changing this, obey lazy import semantics.
         self._modules = dict(modules) if modules is not None else {}
         self._auto_import = auto_import
@@ -67,6 +66,11 @@ class AIHelpers:
             raise AIHelperError("empty address/name cannot be resolved")
         try:
             return self._checked_ea(int(text, 0))
+        except ValueError:
+            pass
+        try:
+            # Accept leading-zero decimals; future changes must keep name resolution as the final fallback.
+            return self._checked_ea(int(text, 10))
         except ValueError:
             pass
 
@@ -354,22 +358,20 @@ class AIHelpers:
         return pack
 
     def write_artifact(self, name: str, value: Any) -> dict[str, Any]:
-        """Write a JSON, JSONL, text, or binary artifact and return metadata."""
+        """Write a JSON, JSONL, text, or binary artifact through the hardened ArtifactStore."""
 
-        started = time.perf_counter_ns()
-        target = self._artifact_path(name, value)
-        payload, artifact_format, count = self._artifact_payload(target, value)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-        elapsed_ms = (time.perf_counter_ns() - started) // 1_000_000
-        return {
-            "artifact": str(target),
-            "format": artifact_format,
-            "bytes": len(payload),
-            "count": count,
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "elapsed_ms": elapsed_ms,
-        }
+        relative = self._artifact_relative_name(name, value)
+        store = self._artifacts()
+        try:
+            if relative.endswith(".bin"):
+                return store.write_binary(relative, value)
+            if relative.endswith(".txt"):
+                return store.write_text(relative, value)
+            if relative.endswith(".jsonl"):
+                return store.write_jsonl(relative, self._jsonl_rows(value))
+            return store.write_json(relative, value)
+        except (TypeError, ValueError) as exc:
+            raise AIHelperError(f"cannot write artifact {name!r}: {exc}") from exc
 
     def propose_rename(self, ea_or_name: int | str, new_name: str, flags: int = 0) -> dict[str, Any]:
         """Return a proposed rename without mutating the database."""
@@ -377,11 +379,13 @@ class AIHelpers:
         return self.mutations.propose_rename(ea_or_name, new_name, flags)
 
     def rename(self, ea_or_name: int | str, new_name: str, flags: int = 0) -> dict[str, Any]:
-        """Rename an address and mark cached indexes stale."""
+        """Rename an address and mark cached indexes stale, even after a partial failure."""
 
-        result = self.mutations.rename(ea_or_name, new_name, flags)
-        self.cache.mark_stale("rename applied")
-        return result
+        # Invalidate in finally; when changing this, obey stale-after-any-possible-write semantics.
+        try:
+            return self.mutations.rename(ea_or_name, new_name, flags)
+        finally:
+            self.cache.mark_stale("rename applied")
 
     def propose_comment(self, ea_or_name: int | str, comment: str, *, repeatable: bool = False) -> dict[str, Any]:
         """Return a proposed comment without mutating the database."""
@@ -389,11 +393,13 @@ class AIHelpers:
         return self.mutations.propose_comment(ea_or_name, comment, repeatable=repeatable)
 
     def set_comment(self, ea_or_name: int | str, comment: str, *, repeatable: bool = False) -> dict[str, Any]:
-        """Set a comment and mark cached indexes stale."""
+        """Set a comment and mark cached indexes stale, even after a partial failure."""
 
-        result = self.mutations.set_comment(ea_or_name, comment, repeatable=repeatable)
-        self.cache.mark_stale("comment applied")
-        return result
+        # Invalidate in finally; when changing this, obey stale-after-any-possible-write semantics.
+        try:
+            return self.mutations.set_comment(ea_or_name, comment, repeatable=repeatable)
+        finally:
+            self.cache.mark_stale("comment applied")
 
     def set_repeatable_comment(self, ea_or_name: int | str, comment: str) -> dict[str, Any]:
         """Set a repeatable comment and mark cached indexes stale."""
@@ -411,11 +417,13 @@ class AIHelpers:
         return self.mutations.propose_type(ea_or_name, declaration, flags)
 
     def apply_type(self, ea_or_name: int | str, declaration: str, flags: int = 0) -> dict[str, Any]:
-        """Apply a type and mark cached indexes stale."""
+        """Apply a type and mark cached indexes stale, even after a partial failure."""
 
-        result = self.mutations.apply_type(ea_or_name, declaration, flags)
-        self.cache.mark_stale("type applied")
-        return result
+        # Invalidate in finally; when changing this, obey stale-after-any-possible-write semantics.
+        try:
+            return self.mutations.apply_type(ea_or_name, declaration, flags)
+        finally:
+            self.cache.mark_stale("type applied")
 
     def propose_patch_bytes(self, ea_or_name: int | str, data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
         """Return a proposed byte patch without mutating the database."""
@@ -423,18 +431,22 @@ class AIHelpers:
         return self.mutations.propose_patch_bytes(ea_or_name, data)
 
     def patch_bytes(self, ea_or_name: int | str, data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
-        """Patch bytes and mark cached indexes stale."""
+        """Patch bytes and mark cached indexes stale, even after a partial failure."""
 
-        result = self.mutations.patch_bytes(ea_or_name, data)
-        self.cache.mark_stale("bytes patched")
-        return result
+        # Invalidate in finally; when changing this, obey stale-after-any-possible-write semantics.
+        try:
+            return self.mutations.patch_bytes(ea_or_name, data)
+        finally:
+            self.cache.mark_stale("bytes patched")
 
     def patch_byte(self, ea_or_name: int | str, value: int) -> dict[str, Any]:
-        """Patch one byte and mark cached indexes stale."""
+        """Patch one byte and mark cached indexes stale, even after a partial failure."""
 
-        result = self.mutations.patch_byte(ea_or_name, value)
-        self.cache.mark_stale("byte patched")
-        return result
+        # Invalidate in finally; when changing this, obey stale-after-any-possible-write semantics.
+        try:
+            return self.mutations.patch_byte(ea_or_name, value)
+        finally:
+            self.cache.mark_stale("byte patched")
 
     def propose_save_database(self, path: str | None = None, flags: int = 0) -> dict[str, Any]:
         """Return a proposed explicit database save operation."""
@@ -511,10 +523,10 @@ class AIHelpers:
 
         return self.cache.save_persistent(path)
 
-    def load_cache(self, path: str | Path) -> dict[str, Any]:
+    def load_cache(self, path: str | Path, *, force: bool = False) -> dict[str, Any]:
         """Load persisted cache indexes without querying IDA."""
 
-        return self.cache.load_persistent(path)
+        return self.cache.load_persistent(path, force=force)
 
     def merge_changes(self, changes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         """Merge mutation records and report deterministic conflicts."""
@@ -537,15 +549,23 @@ class AIHelpers:
         disasm_limit: int = 64,
         include_decompile: bool = True,
     ) -> dict[str, Any]:
-        """Return compact evidence for named targets without dumping the whole database."""
+        """Return compact evidence for named targets without dumping the whole database.
+
+        Records are keyed by ``str(target)``: identical keys are processed
+        once, while equivalent targets with different spellings each get a
+        record. ``count`` reflects unique records; ``requested`` counts the
+        input targets.
+        """
 
         target_values = (targets,) if isinstance(targets, (int, str)) else tuple(targets)
         if not target_values:
             raise AIHelperError("focus targets must not be empty")
         records: dict[str, Any] = {}
         for target in target_values:
-            ea = self.get_ea(target)
             key = str(target)
+            if key in records:
+                continue
+            ea = self.get_ea(target)
             record = {"ea": ea, "function": self.function(ea), "disasm": self.disasm(ea, disasm_limit)}
             if include_decompile:
                 try:
@@ -553,7 +573,7 @@ class AIHelpers:
                 except Exception as exc:  # pragma: no cover - exact IDA errors vary.
                     record["decompile_error"] = f"{type(exc).__name__}: {exc}"
             records[key] = record
-        return {"count": len(records), "targets": records}
+        return {"count": len(records), "requested": len(target_values), "targets": records}
 
     def inventory_summary(self, *, function_limit: int = 16, string_limit: int = 16) -> dict[str, Any]:
         """Return a small triage summary instead of full noisy inventories."""
@@ -580,7 +600,8 @@ class AIHelpers:
 
         base = _artifact_prefix(prefix)
         strings = self.strings(string_limit)
-        summary = self.inventory_summary(string_limit=0)
+        # Sample what was exported; future changes must keep summary counts consistent with the strings artifact.
+        summary = self.inventory_summary(string_limit=len(strings))
         return {
             "summary": self.write_artifact(f"{base}/summary.json", summary),
             "functions": self.write_artifact(f"{base}/functions.jsonl", self.functions()),
@@ -912,56 +933,31 @@ class AIHelpers:
             record["iscode"] = bool(getattr(xref, "iscode"))
         return record
 
-    def _artifact_path(self, name: str, value: Any) -> Path:
+    def _artifacts(self) -> Any:
+        """Return the lazily created ArtifactStore bound to this helper's directory."""
+
+        if self._artifact_store is None:
+            from .artifacts import ArtifactStore
+
+            # Bind on first write; when changing this, keep validation identical to run stores.
+            self._artifact_store = ArtifactStore.in_directory(self._artifact_dir)
+        return self._artifact_store
+
+    def _artifact_relative_name(self, name: str, value: Any) -> str:
+        """Return the artifact name with an inferred suffix; the store validates safety."""
+
         if not isinstance(name, str) or not name.strip():
             raise AIHelperError("artifact name must be a non-empty string")
-        raw = Path(name)
-        if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts):
-            raise AIHelperError(f"artifact path escapes artifact directory: {name!r}")
-        suffix = raw.suffix or self._inferred_suffix(value)
-        relative = raw if raw.suffix else raw.with_suffix(suffix)
-        base = self._artifact_dir.resolve()
-        target = (base / relative).resolve()
-        try:
-            target.relative_to(base)
-        except ValueError as exc:
-            raise AIHelperError(f"artifact path escapes artifact directory: {name!r}") from exc
-        return target
+        if PurePosixPath(name.replace("\\", "/")).suffix:
+            return name
+        return f"{name}{self._inferred_suffix(value)}"
 
-    def _artifact_payload(self, target: Path, value: Any) -> tuple[bytes, str, int | None]:
-        suffix = target.suffix.lower()
-        if suffix == ".bin":
-            if not isinstance(value, (bytes, bytearray, memoryview)):
-                raise AIHelperError("binary artifacts require a bytes-like value")
-            payload = bytes(value)
-            return payload, "binary", len(payload)
-        if suffix == ".txt":
-            if not isinstance(value, str):
-                raise AIHelperError("text artifacts require a string value")
-            payload = value.encode("utf-8")
-            return payload, "text", len(value.splitlines())
-        if suffix == ".jsonl":
-            payload, count = self._jsonl_payload(value)
-            return payload, "jsonl", count
-        payload = self._json_bytes(value)
-        return payload, "json", self._json_count(value)
+    def _jsonl_rows(self, value: Any) -> Iterable[Any]:
+        """Return JSONL rows and reject string or scalar payloads early."""
 
-    def _jsonl_payload(self, value: Any) -> tuple[bytes, int]:
         if isinstance(value, (str, bytes, bytearray, memoryview)) or not isinstance(value, Iterable):
             raise AIHelperError("JSONL artifacts require a non-string iterable")
-        chunks: list[bytes] = []
-        count = 0
-        for item in value:
-            chunks.append(self._json_bytes(item) + b"\n")
-            count += 1
-        return b"".join(chunks), count
-
-    def _json_bytes(self, value: Any) -> bytes:
-        try:
-            text = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
-        except (TypeError, ValueError) as exc:
-            raise AIHelperError(f"value is not JSON serializable: {exc}") from exc
-        return text.encode("utf-8")
+        return value
 
     def _inferred_suffix(self, value: Any) -> str:
         if isinstance(value, (bytes, bytearray, memoryview)):
@@ -969,13 +965,6 @@ class AIHelpers:
         if isinstance(value, str):
             return ".txt"
         return ".json"
-
-    def _json_count(self, value: Any) -> int | None:
-        if isinstance(value, Mapping):
-            return len(value)
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray, memoryview)):
-            return len(value)
-        return None
 
     def _checked_limit(self, value: int, name: str, *, allow_zero: bool = False) -> int:
         if isinstance(value, bool) or not isinstance(value, int):
@@ -1351,10 +1340,10 @@ def save_cache(path: str | Path) -> dict[str, Any]:
     return ai.save_cache(path)
 
 
-def load_cache(path: str | Path) -> dict[str, Any]:
+def load_cache(path: str | Path, *, force: bool = False) -> dict[str, Any]:
     """Delegate to the default helper object's persistent cache load."""
 
-    return ai.load_cache(path)
+    return ai.load_cache(path, force=force)
 
 
 def merge_changes(changes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

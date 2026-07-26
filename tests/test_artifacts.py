@@ -119,6 +119,18 @@ class ArtifactStoreTests(unittest.TestCase):
 
             self.assertFalse((store.artifact_dir / "nan.json").exists())
 
+    def test_in_directory_store_writes_text_with_local_prefix(self) -> None:
+        """Directory-bound stores should write text under their own directory name."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "artifacts"
+            store = ArtifactStore.in_directory(target)
+
+            metadata = store.write_text("notes.txt", "hello\nworld")
+
+            self.assertEqual((target / "notes.txt").read_text(encoding="utf-8"), "hello\nworld")
+            self.assertEqual(metadata["artifact"], "artifacts/notes.txt")
+            self.assertEqual(metadata["size"], len("hello\nworld".encode("utf-8")))
+
     def test_metadata_is_json_serializable(self) -> None:
         """Returned metadata should be ready for protocol response encoding."""
         with tempfile.TemporaryDirectory() as temp_dir:

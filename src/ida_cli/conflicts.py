@@ -18,7 +18,13 @@ def merge_changes(changes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def merge_change_sets(change_sets: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Merge branch change sets into JSON-compatible records and conflicts."""
+    """Merge branch change sets into JSON-compatible records and conflicts.
+
+    Change-set order IS priority order: for each resource, the first change
+    set's record wins and later conflicting records are reported in
+    ``conflicts``, not merged. Merging the same change sets in a different
+    order can therefore yield a different winner.
+    """
 
     merged: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
@@ -33,18 +39,20 @@ def merge_change_sets(change_sets: Iterable[Mapping[str, Any]]) -> dict[str, Any
                 continue
             seen_records.add(canonical)
             resources = _resources(record["change"])
-            collided = False
+            record_conflicts: list[dict[str, Any]] = []
             for resource in resources:
                 previous = by_resource.get(resource)
-                if previous is None:
+                if previous is None or _same_effect(previous["change"], record["change"], resource):
+                    continue
+                record_conflicts.append(_conflict(resource, previous, record))
+            if record_conflicts:
+                # Register nothing for unmerged records; future changes must not let losers claim resources.
+                conflicts.extend(record_conflicts)
+                continue
+            for resource in resources:
+                if resource not in by_resource:
                     by_resource[resource] = record
-                    continue
-                if _same_effect(previous["change"], record["change"], resource):
-                    continue
-                conflicts.append(_conflict(resource, previous, record))
-                collided = True
-            if not collided:
-                merged.append(record["change"])
+            merged.append(record["change"])
     return {
         "ok": not conflicts,
         "merged": merged,
@@ -164,7 +172,7 @@ def _changed_addresses(change: Mapping[str, Any]) -> list[int]:
     """Return changed byte addresses for byte patch conflict detection."""
 
     values = change.get("changed_addresses")
-    if not isinstance(values, list) or not values:
+    if not isinstance(values, list):
         raise ConflictMergeError("patch_bytes changes require changed_addresses")
     if not all(isinstance(value, int) and value >= 0 for value in values):
         raise ConflictMergeError("changed_addresses must be non-negative integers")

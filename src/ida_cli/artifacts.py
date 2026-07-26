@@ -44,6 +44,18 @@ class ArtifactStore:
         metadata_prefix = PurePosixPath(*prefix_parts, safe_run_id, _ARTIFACT_DIR)
         return cls(runs_path / safe_run_id, metadata_prefix=metadata_prefix)
 
+    @classmethod
+    def in_directory(cls, artifact_dir: str | os.PathLike[str]) -> "ArtifactStore":
+        """Create a store that writes directly into one existing artifact directory."""
+        # Bind without a run layout; future changes must keep containment identical to run stores.
+        path = Path(artifact_dir)
+        store = cls.__new__(cls)
+        store._run_dir = path
+        store._artifact_dir = path
+        store._metadata_prefix = PurePosixPath(path.name or _ARTIFACT_DIR)
+        store._artifact_dir.mkdir(parents=True, exist_ok=True)
+        return store
+
     @property
     def run_dir(self) -> Path:
         """Return the run directory path."""
@@ -89,6 +101,13 @@ class ArtifactStore:
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError("binary artifact data must be bytes-like")
         return self._write_bytes(name, bytes(data), count=None)
+
+    def write_text(self, name: str | os.PathLike[str], text: str) -> dict[str, Any]:
+        """Write one UTF-8 text artifact and return metadata."""
+        # Accept str only; future changes must not coerce arbitrary values into text.
+        if not isinstance(text, str):
+            raise TypeError("text artifact data must be a string")
+        return self._write_bytes(name, text.encode("utf-8"), count=None)
 
     def _write_bytes(self, name: str | os.PathLike[str], data: bytes, *, count: int | None) -> dict[str, Any]:
         """Atomically write bytes and return protocol-ready metadata."""

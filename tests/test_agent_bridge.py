@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from ida_cli import agent_bridge as agent_bridge_mod
 from ida_cli.agent_bridge import AgentBridgeError, AgentSession
 
 
@@ -76,6 +80,19 @@ class AgentBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(AgentBridgeError, "timed out"):
                 session.execute("__result__ = 1")
             self.assertIsNotNone(session._process.poll())
+
+    def test_daemon_startup_failure_reports_daemon_stderr(self) -> None:
+        command = (
+            sys.executable,
+            "-B",
+            "-c",
+            "import sys; sys.stderr.write('daemon boom evidence'); sys.stderr.flush(); sys.exit(3)",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"IDA_CLI_DAEMON_DIR": temp_dir}), \
+                 mock.patch.object(agent_bridge_mod, "_DAEMON_STARTUP_TIMEOUT", 0.5):
+                with self.assertRaisesRegex(AgentBridgeError, "daemon boom evidence"):
+                    AgentSession.start("D:/targets/failing-daemon.exe", command=command, daemon=True)
 
 
 def _one_response_command(response: str) -> tuple[str, ...]:

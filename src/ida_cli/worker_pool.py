@@ -412,7 +412,12 @@ def _elapsed_ms_since(start_ns: int) -> int:
 
 
 class LocalWorkerPool:
-    """Deterministic local scheduler facade; it does not import or launch IDA."""
+    """Deterministic local scheduler facade; it does not import or launch IDA.
+
+    Sequential facade: `fanout` executes shards one at a time on the caller
+    thread. Instances are not thread-safe — do not share one pool across
+    threads; internal state is unsynchronized.
+    """
 
     def __init__(self, worker_specs: Iterable[WorkerSpec]) -> None:
         specs = tuple(worker_specs)

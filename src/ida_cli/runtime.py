@@ -7,13 +7,84 @@ import io
 import json
 import math
 import reprlib
+import sys
+import threading
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from types import TracebackType
-from typing import Any
+from typing import Any, TextIO
 
 REQUEST_FILENAME = "<ida-cli-request>"
+
+_CAPTURE_LOCAL = threading.local()
+_MAIN_THREAD = threading.main_thread()
+_STREAM_PROXIES_INSTALLED = False
+
+
+class _ThreadRoutedStream:
+    """Route stream writes by thread so stray threads never corrupt protocol stdout.
+
+    The executing thread writes to its per-request capture buffer; any other
+    thread (e.g. strays spawned by executed code) writes to the real stderr,
+    never the real stdout; the main thread outside a request passes through
+    to the wrapped stream so host tooling keeps working.
+    """
+
+    def __init__(self, buffer_attr: str, passthrough: TextIO, fallback: TextIO) -> None:
+        """Bind one proxy to its thread-local slot, passthrough, and fallback."""
+        self._buffer_attr = buffer_attr
+        self._passthrough = passthrough
+        self._fallback = fallback
+
+    def _target(self) -> TextIO:
+        buffer = getattr(_CAPTURE_LOCAL, self._buffer_attr, None)
+        if buffer is not None:
+            return buffer
+        if threading.current_thread() is _MAIN_THREAD:
+            return self._passthrough
+        return self._fallback
+
+    def write(self, text: str) -> int:
+        """Write to the routed target; when editing, keep foreign threads off stdout."""
+        return self._target().write(text)
+
+    def writelines(self, lines: Iterable[str]) -> None:
+        """Write each line through the same per-write routing."""
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """Flush the currently routed target."""
+        self._target().flush()
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate every other attribute to the wrapped passthrough stream."""
+        return getattr(self._passthrough, name)
+
+
+def _install_stream_proxies() -> None:
+    """Install one process-lifetime stdout/stderr proxy pair exactly once."""
+    global _STREAM_PROXIES_INSTALLED
+    if _STREAM_PROXIES_INSTALLED:
+        return
+    real_stderr = sys.stderr if sys.stderr is not None else sys.__stderr__
+    real_stdout = sys.stdout if sys.stdout is not None else real_stderr
+    sys.stdout = _ThreadRoutedStream("stdout_buffer", real_stdout, real_stderr)  # type: ignore[assignment]
+    sys.stderr = _ThreadRoutedStream("stderr_buffer", real_stderr, real_stderr)  # type: ignore[assignment]
+    _STREAM_PROXIES_INSTALLED = True
+
+
+@contextlib.contextmanager
+def _capture_request_streams(stdout_buffer: io.StringIO, stderr_buffer: io.StringIO) -> Iterator[None]:
+    """Bind capture buffers to the executing thread for one request only."""
+    _CAPTURE_LOCAL.stdout_buffer = stdout_buffer
+    _CAPTURE_LOCAL.stderr_buffer = stderr_buffer
+    try:
+        yield
+    finally:
+        _CAPTURE_LOCAL.stdout_buffer = None
+        _CAPTURE_LOCAL.stderr_buffer = None
 
 
 class RuntimeRequestError(ValueError):
@@ -36,6 +107,7 @@ class PythonRuntime:
         run_dir: str | None = None,
     ) -> None:
         """Create persistent globals; when changing names here, preserve raw imports."""
+        _install_stream_proxies()
         self.globals: dict[str, Any] = {
             "__builtins__": __builtins__,
             "ai": RuntimeAiHelper() if ai is None else ai,
@@ -53,7 +125,7 @@ class PythonRuntime:
         has_request_id: bool | None = None,
         bindings: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run one unrestricted request; when editing this, keep capture process-local."""
+        """Run one unrestricted request; keep capture thread-local and exits enveloped."""
         include_id = request_id is not None if has_request_id is None else has_request_id
         if not isinstance(code, str):
             return self._error_response(
@@ -72,10 +144,12 @@ class PythonRuntime:
             request_bindings = _request_bindings(bindings)
             compiled = compile(code, REQUEST_FILENAME, "exec")
             self.globals.pop("__result__", None)
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with _capture_request_streams(stdout, stderr):
                 with _RequestBindings(self.globals, request_bindings):
                     exec(compiled, self.globals, self.globals)
-        except Exception as exc:
+        except (Exception, SystemExit, KeyboardInterrupt) as exc:
+            # SystemExit/KeyboardInterrupt raised by executed code must become
+            # error envelopes; letting them escape would kill the kernel process.
             elapsed_ms = _elapsed_ms(start_ns)
             return self._error_response(
                 request_id,

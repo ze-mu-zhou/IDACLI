@@ -119,12 +119,15 @@ def _scan_python_candidates() -> list[str]:
 
 
 def _fallback_wsl_to_win(wsl_path: str) -> str:
-    """Best-effort WSL-to-Win conversion without wslpath."""
-    p = Path(wsl_path)
-    parts = p.parts
-    if len(parts) >= 3 and parts[0] == "/" and parts[1] == "mnt":
-        drive = parts[2].upper()
-        tail = "\\".join(parts[3:])
+    """Best-effort WSL-to-Win conversion without wslpath.
+
+    String-based (not pathlib) so results are identical on any host Python.
+    """
+    normalized = wsl_path.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    if normalized.startswith("/mnt/") and len(parts) >= 2:
+        drive = parts[1].upper()
+        tail = "\\".join(parts[2:])
         return f"{drive}:\\{tail}"
     return wsl_path
 

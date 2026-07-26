@@ -127,19 +127,29 @@ class DatabaseMutations:
         return self._patch_record(ea, old_bytes, payload, applied=False)
 
     def patch_bytes(self, ea_or_name: int | str, data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
-        """Patch bytes through IDA and report every changed address."""
+        """Patch bytes through IDA and report every changed address.
+
+        A mid-patch failure triggers a best-effort restore of the original
+        bytes; when the restore itself fails the database keeps a partially
+        applied patch and the error still propagates.
+        """
 
         ea = self._resolve_ea(ea_or_name)
         payload = self._byte_payload(data)
         old_bytes = self._read_bytes(ea, len(payload))
         patch_byte = self._require_attr("ida_bytes", "patch_byte")
-        for index, (old_value, new_value) in enumerate(zip(old_bytes, payload, strict=True)):
-            if old_value != new_value:
-                address = self._checked_ea(ea + index)
-                self._must_succeed(patch_byte(address, new_value), "ida_bytes.patch_byte")
-        actual_bytes = self._read_bytes(ea, len(payload))
-        if actual_bytes != payload:
-            raise MutationError(f"ida_bytes.patch_byte did not apply the exact byte sequence at 0x{ea:x}")
+        try:
+            for index, (old_value, new_value) in enumerate(zip(old_bytes, payload, strict=True)):
+                if old_value != new_value:
+                    address = self._checked_ea(ea + index)
+                    self._must_succeed(patch_byte(address, new_value), "ida_bytes.patch_byte")
+            actual_bytes = self._read_bytes(ea, len(payload))
+            if actual_bytes != payload:
+                raise MutationError(f"ida_bytes.patch_byte did not apply the exact byte sequence at 0x{ea:x}")
+        except Exception:
+            # Restore original bytes; future changes must keep this best-effort and never mask the root error.
+            self._restore_bytes(ea, old_bytes, payload, patch_byte)
+            raise
         return self._patch_record(ea, old_bytes, payload, applied=True)
 
     def patch_byte(self, ea_or_name: int | str, value: int) -> dict[str, Any]:
@@ -290,6 +300,11 @@ class DatabaseMutations:
             return self._checked_ea(int(text, 0))
         except ValueError:
             pass
+        try:
+            # Accept leading-zero decimals; future changes must keep name resolution as the final fallback.
+            return self._checked_ea(int(text, 10))
+        except ValueError:
+            pass
 
         get_name_ea = self._require_attr("ida_name", "get_name_ea")
         ea = int(get_name_ea(self._badaddr(), text))
@@ -322,6 +337,17 @@ class DatabaseMutations:
                 raise MutationError(f"ida_bytes.get_db_byte returned invalid byte at 0x{address:x}: {value!r}")
             values.append(value)
         return bytes(values)
+
+    def _restore_bytes(self, ea: int, old_bytes: bytes, payload: bytes, patch_byte: Any) -> None:
+        """Best-effort restore of original bytes after a failed patch sequence."""
+
+        for index, (old_value, new_value) in enumerate(zip(old_bytes, payload, strict=True)):
+            if old_value == new_value:
+                continue
+            try:
+                patch_byte(self._checked_ea(ea + index), old_value)
+            except Exception:
+                continue
 
     def _byte_payload(self, data: bytes | bytearray | memoryview | str) -> bytes:
         if isinstance(data, str):
@@ -414,7 +440,7 @@ class DatabaseMutations:
         return module
 
     def _must_succeed(self, result: Any, api: str) -> None:
-        if result is True or result == 1:
+        if result:
             return
         raise MutationError(f"{api} failed with result {result!r}")
 

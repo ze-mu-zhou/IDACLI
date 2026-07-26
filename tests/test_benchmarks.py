@@ -48,6 +48,7 @@ class IdaRuntimeBenchmarkTests(unittest.TestCase):
             check=True,
             cwd=ROOT,
             text=True,
+            timeout=30,
         )
 
         self.assertEqual(completed.stderr, "")

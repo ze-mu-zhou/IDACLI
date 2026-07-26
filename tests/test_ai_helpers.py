@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ida_cli import ai_helpers
 from ida_cli.ai_helpers import AIHelperError, AIHelpers
+from ida_cli.mutations import MutationError
 
 
 BADADDR = (1 << 64) - 1
@@ -153,16 +154,25 @@ class AIHelpersTests(unittest.TestCase):
 
     def test_write_artifact_without_ida_writes_json_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            helper = AIHelpers(tmp, auto_import=False)
+            helper_dir = Path(tmp) / "artifacts"
+            helper = AIHelpers(helper_dir, auto_import=False)
             meta = helper.write_artifact("facts", {"answer": 42})
-            artifact = Path(meta["artifact"])
-            payload = artifact.read_bytes()
+            payload = (helper_dir / "facts.json").read_bytes()
 
-        self.assertEqual(meta["format"], "json")
-        self.assertEqual(meta["count"], 1)
-        self.assertEqual(meta["bytes"], len(payload))
+        self.assertEqual(meta["artifact"], "artifacts/facts.json")
+        self.assertEqual(meta["size"], len(payload))
         self.assertEqual(meta["sha256"], hashlib.sha256(payload).hexdigest())
         self.assertEqual(json.loads(payload), {"answer": 42})
+
+    def test_write_artifact_rejects_windows_reserved_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            helper_dir = Path(tmp) / "artifacts"
+            helper = AIHelpers(helper_dir, auto_import=False)
+
+            with self.assertRaises(AIHelperError):
+                helper.write_artifact("CON.json", {"bad": True})
+
+            self.assertFalse((helper_dir / "CON.json").exists())
 
     def test_write_artifact_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,6 +186,11 @@ class AIHelpersTests(unittest.TestCase):
         self.assertEqual(ai_helpers.get_ea(0x401000), 0x401000)
         with self.assertRaises(AIHelperError):
             helper.get_ea("start")
+
+    def test_get_ea_accepts_leading_zero_decimal(self) -> None:
+        helper = AIHelpers(auto_import=False)
+
+        self.assertEqual(helper.get_ea("010"), 10)
 
     def test_fake_ida_methods_return_json_compatible_records(self) -> None:
         helper = AIHelpers(modules=fake_modules(), auto_import=False)
@@ -231,7 +246,8 @@ class AIHelpersTests(unittest.TestCase):
 
     def test_focus_summary_and_inventory_export_keep_large_data_in_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            helper = AIHelpers(tmp, modules=fake_modules(), auto_import=False)
+            helper_dir = Path(tmp) / "artifacts"
+            helper = AIHelpers(helper_dir, modules=fake_modules(), auto_import=False)
 
             focused = helper.focus("start", disasm_limit=1)
             summary = helper.inventory_summary(function_limit=1, string_limit=1)
@@ -240,8 +256,46 @@ class AIHelpersTests(unittest.TestCase):
             self.assertEqual(focused["targets"]["start"]["disasm"][0]["line"], "push rbp")
             self.assertEqual(summary["counts"]["functions"], 1)
             self.assertEqual(len(summary["functions"]), 1)
-            for metadata in exported.values():
-                self.assertTrue(Path(metadata["artifact"]).is_file())
+            expected = {
+                "summary": "summary.json",
+                "functions": "functions.jsonl",
+                "imports": "imports.jsonl",
+                "names": "names.jsonl",
+                "strings": "strings.jsonl",
+            }
+            for key, filename in expected.items():
+                metadata = exported[key]
+                artifact = helper_dir / "triage" / filename
+                self.assertEqual(metadata["artifact"], f"artifacts/triage/{filename}")
+                self.assertEqual(metadata["size"], artifact.stat().st_size)
+                self.assertEqual(metadata["sha256"], hashlib.sha256(artifact.read_bytes()).hexdigest())
+
+    def test_export_inventory_summary_counts_exported_strings(self) -> None:
+        modules = fake_modules()
+        modules["idautils"].Strings = lambda: [FakeString(0x3000, "hello"), FakeString(0x3010, "world")]
+        with tempfile.TemporaryDirectory() as tmp:
+            helper_dir = Path(tmp) / "artifacts"
+            helper = AIHelpers(helper_dir, modules=modules, auto_import=False)
+
+            helper.export_inventory("triage")
+
+            summary = json.loads((helper_dir / "triage" / "summary.json").read_text(encoding="utf-8"))
+            strings_rows = (helper_dir / "triage" / "strings.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(strings_rows), 2)
+            self.assertEqual(summary["counts"]["strings_sampled"], 2)
+
+    def test_focus_reports_requested_targets_and_dedupes_identical_keys(self) -> None:
+        helper = AIHelpers(modules=fake_modules(), auto_import=False)
+
+        focused = helper.focus(["start", "start"], disasm_limit=1, include_decompile=False)
+        self.assertEqual(focused["requested"], 2)
+        self.assertEqual(focused["count"], 1)
+        self.assertEqual(list(focused["targets"]), ["start"])
+
+        spelled = helper.focus(["start", 0x1000], disasm_limit=1, include_decompile=False)
+        self.assertEqual(spelled["requested"], 2)
+        self.assertEqual(spelled["count"], 2)
+        self.assertEqual({record["ea"] for record in spelled["targets"].values()}, {0x1000})
 
     def test_pwn_overview_collects_dangerous_imports_and_shell_clues(self) -> None:
         modules = fake_modules()
@@ -322,9 +376,61 @@ class AIHelpersTests(unittest.TestCase):
         self.assertTrue(helper.cache_status()["stale"])
         self.assertIn("patched", helper.cache_status()["stale_reason"])
 
+    def test_failed_patch_restores_bytes_and_marks_cache_stale(self) -> None:
+        state = {"bytes": {0x2000: 0x90, 0x2001: 0x00, 0x2002: 0xCC, 0x2003: 0x41, 0x2004: 0x42}}
+
+        def patch_byte(ea: int, value: int) -> bool:
+            if ea == 0x2003:
+                return False
+            state["bytes"][ea] = value
+            return True
+
+        modules = fake_modules()
+        modules["ida_idaapi"] = SimpleNamespace(BADADDR=BADADDR)
+        modules["ida_bytes"] = SimpleNamespace(
+            get_db_byte=lambda ea: state["bytes"].get(ea, -1),
+            patch_byte=patch_byte,
+        )
+        helper = AIHelpers(modules=modules, auto_import=False)
+        helper.refresh_cache()
+        self.assertFalse(helper.cache_status()["stale"])
+
+        with self.assertRaises(MutationError):
+            helper.patch_bytes(0x2000, b"\x01\x02\x03\x04\x05")
+
+        self.assertTrue(helper.cache_status()["stale"])
+        self.assertEqual(
+            state["bytes"],
+            {0x2000: 0x90, 0x2001: 0x00, 0x2002: 0xCC, 0x2003: 0x41, 0x2004: 0x42},
+        )
+
+    def test_sanitized_rename_marks_cache_stale_after_error(self) -> None:
+        names = {0x1000: "start"}
+
+        def set_name(ea: int, name: str, _flags: int) -> bool:
+            names[ea] = name.replace(" ", "_")
+            return True
+
+        modules = fake_modules()
+        modules["ida_idaapi"] = SimpleNamespace(BADADDR=BADADDR)
+        modules["ida_name"] = SimpleNamespace(
+            get_name=lambda ea: names.get(ea),
+            get_name_ea=lambda _badaddr, name: next((ea for ea, current in names.items() if current == name), BADADDR),
+            set_name=set_name,
+        )
+        helper = AIHelpers(modules=modules, auto_import=False)
+        helper.refresh_cache()
+        self.assertFalse(helper.cache_status()["stale"])
+
+        with self.assertRaises(MutationError):
+            helper.rename(0x1000, "has space")
+
+        self.assertEqual(names[0x1000], "has_space")
+        self.assertTrue(helper.cache_status()["stale"])
+
     def test_cache_methods_are_available_on_ai_helper_and_export_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            helper = AIHelpers(tmp, modules=fake_modules(), auto_import=False)
+            helper = AIHelpers(Path(tmp) / "artifacts", modules=fake_modules(), auto_import=False)
 
             status = helper.refresh_cache()
             functions = helper.cached_functions()
@@ -333,12 +439,13 @@ class AIHelpersTests(unittest.TestCase):
             saved = helper.save_cache(Path(tmp) / "persistent-cache.json")
             helper.mark_cache_stale("test reload")
             loaded = helper.load_cache(saved["path"])
-            artifact = Path(exported["artifact"]["artifact"])
+            artifact = Path(tmp) / "artifacts" / "cache" / "index.json"
 
             self.assertFalse(status["stale"])
             self.assertEqual(functions[0]["name"], "start")
             self.assertIn("return 0", decompiled["pseudocode"])
             self.assertFalse(loaded["status"]["stale"])
+            self.assertEqual(exported["artifact"]["artifact"], "artifacts/cache/index.json")
             self.assertTrue(artifact.is_file())
             self.assertEqual(json.loads(artifact.read_text(encoding="utf-8"))["schema"], "ida-cli-cache-index-v1")
 

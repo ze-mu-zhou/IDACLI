@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 _STDERR_TAIL_CHARS = 4096
 _OMIT_ID = object()
 _DAEMON_STARTUP_TIMEOUT = 15.0
+_DAEMON_STDERR_TAIL_CHARS = 2048
 
 
 class AgentBridgeError(RuntimeError):
@@ -130,15 +132,27 @@ class AgentSession:
         else:
             argv = tuple(command) if command else (sys.executable, "-B", "-m", "ida_cli")
             # Daemon auto-detects WSL via WSLENV and uses /tmp/.ida-cli/
-            subprocess.Popen(
-                (*argv, "--daemon", target),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            # Keep the daemon's stderr so startup failures stay diagnosable.
+            stderr_file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
+            try:
+                subprocess.Popen(
+                    (*argv, "--daemon", target),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr_file,
+                )
+            except Exception:
+                stderr_file.close()
+                raise
             deadline = _time.monotonic() + _DAEMON_STARTUP_TIMEOUT
             while not is_daemon_running(target):
                 if _time.monotonic() > deadline:
-                    raise AgentBridgeError(f"Daemon did not start within {_DAEMON_STARTUP_TIMEOUT}s for {target!r}")
+                    tail = _stream_tail(stderr_file, _DAEMON_STDERR_TAIL_CHARS)
+                    stderr_file.close()
+                    raise AgentBridgeError(
+                        f"Daemon did not start within {_DAEMON_STARTUP_TIMEOUT}s for {target!r}; "
+                        f"daemon stderr tail: {tail!r}"
+                    )
                 _time.sleep(0.1)
+            stderr_file.close()
             session = cls.connect(target, request_timeout_s=request_timeout_s)
         if probe_backend or require_ida:
             try:
@@ -230,7 +244,16 @@ class AgentSession:
 
     def _read_response(self, timeout_s: float) -> dict[str, Any]:
         if self._daemon_client is not None:
-            line = self._daemon_client.readline()
+            effective = _require_timeout("timeout_s", timeout_s)
+            self._daemon_client.set_read_timeout(effective)
+            try:
+                line = self._daemon_client.readline()
+            except socket.timeout as exc:
+                raise AgentBridgeTimeoutError(
+                    f"daemon response timed out after {effective:.3f}s"
+                ) from exc
+            finally:
+                self._daemon_client.set_read_timeout(None)
             if not line:
                 raise AgentBridgeError("daemon connection closed unexpectedly")
             return self._parse_response(line)
@@ -273,12 +296,17 @@ class AgentSession:
     def _stderr_tail(self) -> str:
         if self._stderr_file is None:
             return "(daemon mode — no stderr)"
-        self._stderr_file.flush()
-        end = self._stderr_file.tell()
-        self._stderr_file.seek(max(0, end - _STDERR_TAIL_CHARS))
-        tail = self._stderr_file.read()
-        self._stderr_file.seek(end)
-        return tail
+        return _stream_tail(self._stderr_file, _STDERR_TAIL_CHARS)
+
+
+def _stream_tail(stream: TextIO, max_chars: int) -> str:
+    """Return the last max_chars of a seekable text stream."""
+    stream.flush()
+    end = stream.tell()
+    stream.seek(max(0, end - max_chars))
+    tail = stream.read()
+    stream.seek(end)
+    return tail
 
 
 def _response_error_message(response: Mapping[str, Any]) -> str:

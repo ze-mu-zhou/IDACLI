@@ -9,6 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -33,7 +34,9 @@ class FakeIdaDatabase:
         self.fail_name = False
         self.fail_type = False
         self.fail_patch = False
+        self.fail_patch_at: int | None = None
         self.fail_save = False
+        self.patch_result: Any = True
 
     def modules(self) -> dict[str, object]:
         """Return injected IDAPython-shaped modules for helper tests."""
@@ -109,13 +112,13 @@ class FakeIdaDatabase:
 
         return self.bytes.get(ea, -1)
 
-    def patch_byte(self, ea: int, value: int) -> bool:
+    def patch_byte(self, ea: int, value: int) -> Any:
         """Patch or reject one fake byte."""
 
-        if self.fail_patch:
+        if self.fail_patch or ea == self.fail_patch_at:
             return False
         self.bytes[ea] = value
-        return True
+        return self.patch_result
 
     def save_database(self, path: str | None, flags: int) -> bool:
         """Record or reject one explicit fake database save."""
@@ -249,6 +252,39 @@ class MutationTests(unittest.TestCase):
         fake.fail_save = True
         with self.assertRaisesRegex(MutationError, "ida_loader.save_database"):
             helper_for(fake).save_database()
+
+    def test_patch_bytes_restores_original_bytes_after_mid_patch_failure(self) -> None:
+        fake = FakeIdaDatabase()
+        fake.bytes.update({0x2003: 0x41, 0x2004: 0x42})
+        fake.fail_patch_at = 0x2003
+        helper = helper_for(fake)
+
+        with self.assertRaisesRegex(MutationError, "ida_bytes.patch_byte"):
+            helper.patch_bytes(0x2000, b"\x01\x02\x03\x04\x05")
+
+        self.assertEqual(fake.bytes[0x2000], 0x90)
+        self.assertEqual(fake.bytes[0x2001], 0x00)
+        self.assertEqual(fake.bytes[0x2002], 0xCC)
+        self.assertEqual(fake.bytes[0x2003], 0x41)
+        self.assertEqual(fake.bytes[0x2004], 0x42)
+
+    def test_resolve_ea_accepts_leading_zero_decimal(self) -> None:
+        fake = FakeIdaDatabase()
+        helper = helper_for(fake)
+
+        proposed = helper.propose_rename("010", "renamed")
+
+        self.assertEqual(proposed["target"]["ea"], 10)
+
+    def test_truthy_non_one_results_count_as_success(self) -> None:
+        fake = FakeIdaDatabase()
+        fake.patch_result = 2
+        helper = helper_for(fake)
+
+        applied = helper.patch_byte(0x2002, 0x90)
+
+        self.assertTrue(applied["applied"])
+        self.assertEqual(fake.bytes[0x2002], 0x90)
 
     def test_invalid_inputs_are_rejected_without_mutation(self) -> None:
         fake = FakeIdaDatabase()

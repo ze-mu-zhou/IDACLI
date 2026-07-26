@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -15,11 +16,19 @@ from ida_cli.cache import CacheError, IDACache, load_persistent_cache
 class FakeCacheProvider:
     """IDA-shaped provider that keeps cache tests independent from IDA."""
 
-    def __init__(self) -> None:
+    def __init__(self, fingerprint: dict[str, object] | None = None) -> None:
         # Count expensive calls; future changes must preserve repeated-read cache wins.
         self.decompile_calls = 0
         self.refresh_reads = 0
         self.extra_names: list[tuple[int, str]] = [(0x1000, "main")]
+        self._fingerprint = dict(fingerprint) if fingerprint is not None else None
+
+    def fingerprint(self) -> dict[str, object]:
+        """Return the fake database fingerprint, mirroring None-safe IDA lookups."""
+
+        if self._fingerprint is None:
+            return {"root_filename": None, "input_md5": None}
+        return dict(self._fingerprint)
 
     def functions(self) -> list[dict[str, object]]:
         """Return deterministic function records."""
@@ -190,6 +199,76 @@ class CacheTests(unittest.TestCase):
 
             with self.assertRaisesRegex(CacheError, "kind mismatch"):
                 IDACache(FakeCacheProvider()).load_persistent(path)
+
+    def test_persistent_cache_matching_fingerprint_loads(self) -> None:
+        fingerprint = {"root_filename": "/bin/sample", "input_md5": "abc123"}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "cache.json"
+            cache = IDACache(FakeCacheProvider(fingerprint=fingerprint))
+            cache.refresh()
+            cache.save_persistent(path)
+
+            loaded = load_persistent_cache(FakeCacheProvider(fingerprint=fingerprint), path)
+
+            self.assertFalse(loaded.status()["stale"])
+            self.assertEqual(loaded.functions()[0]["name"], "main")
+
+    def test_persistent_cache_fingerprint_mismatch_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "cache.json"
+            cache = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/a", "input_md5": "aaa"}))
+            cache.refresh()
+            cache.save_persistent(path)
+
+            other = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/b", "input_md5": "bbb"}))
+            with self.assertRaisesRegex(CacheError, "fingerprint mismatch"):
+                other.load_persistent(path)
+            self.assertTrue(other.status()["stale"])
+
+            forced = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/b", "input_md5": "bbb"}))
+            forced.load_persistent(path, force=True)
+            self.assertFalse(forced.status()["stale"])
+            self.assertEqual(forced.functions()[0]["name"], "main")
+
+    def test_persistent_cache_allows_missing_fingerprint_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "cache.json"
+            cache = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/a", "input_md5": "aaa"}))
+            cache.refresh()
+            cache.save_persistent(path)
+
+            with self.subTest(case="current side lacks data"):
+                loaded = IDACache(FakeCacheProvider())
+                loaded.load_persistent(path)
+                self.assertFalse(loaded.status()["stale"])
+
+            with self.subTest(case="stored side lacks data"):
+                plain_path = Path(temp_dir) / "plain.json"
+                plain = IDACache(FakeCacheProvider())
+                plain.refresh()
+                plain.save_persistent(plain_path)
+                loaded = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/a"}))
+                loaded.load_persistent(plain_path)
+                self.assertFalse(loaded.status()["stale"])
+
+            with self.subTest(case="legacy envelope without fingerprint key"):
+                wrapper = json.loads(path.read_text(encoding="utf-8"))
+                del wrapper["fingerprint"]
+                legacy_path = Path(temp_dir) / "legacy.json"
+                legacy_path.write_text(json.dumps(wrapper), encoding="utf-8")
+                loaded = IDACache(FakeCacheProvider(fingerprint={"root_filename": "/bin/other"}))
+                loaded.load_persistent(legacy_path)
+                self.assertFalse(loaded.status()["stale"])
+
+    def test_get_ea_accepts_leading_zero_decimal_and_rejects_badaddr(self) -> None:
+        cache = IDACache(FakeCacheProvider())
+        cache.refresh()
+
+        self.assertEqual(cache.get_ea("010"), 10)
+        with self.assertRaisesRegex(CacheError, "invalid effective address"):
+            cache.get_ea((1 << 64) - 1)
+        with self.assertRaisesRegex(CacheError, "invalid effective address"):
+            cache.get_ea("0xFFFFFFFFFFFFFFFF")
 
     def test_refresh_fails_fast_on_ambiguous_duplicate_names(self) -> None:
         provider = FakeCacheProvider()

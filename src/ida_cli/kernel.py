@@ -17,6 +17,8 @@ from .runtime import PythonRuntime
 
 _DEEP_DISCOVERY_ENV = "IDA_CLI_DEEP_IDA_DISCOVERY"
 _CACHED_IDA_ROOT: Path | None = None
+_DRIVE_FIXED = 3  # GetDriveTypeW: local fixed disk
+_DRIVE_RAMDISK = 6  # GetDriveTypeW: RAM disk (also local and non-blocking)
 
 
 class KernelError(RuntimeError):
@@ -62,7 +64,15 @@ class KernelSession:
             return
         self.closed = True
         if self.backend is not None and hasattr(self.backend, "close"):
-            self.backend.close()
+            _close_backend_quietly(self.backend)
+
+
+def _close_backend_quietly(backend: Any) -> None:
+    """Swallow close failures so cleanup never masks the primary error."""
+    try:
+        backend.close()
+    except Exception as exc:
+        print(f"ida-cli kernel: backend close failed during cleanup: {exc}", file=sys.stderr)
 
 
 class PythonOnlyBackend:
@@ -95,11 +105,7 @@ class IdaLibBackend:
     def available(cls) -> bool:
         """Return whether the `idapro` module can be imported now."""
         _prepare_idalib_import_path()
-        try:
-            importlib.import_module("idapro")
-        except ModuleNotFoundError:
-            return False
-        return True
+        return _idapro_importable()
 
     def open(self, target_path: str) -> BackendInfo:
         """Open the target database through idalib and wait for auto-analysis."""
@@ -115,7 +121,7 @@ class IdaLibBackend:
         try:
             _wait_for_auto_analysis()
         except Exception:
-            self.close()
+            _close_backend_quietly(self)
             raise
         return BackendInfo(
             name=self.name,
@@ -166,7 +172,7 @@ def create_session(
         )
     except Exception:
         if hasattr(selected, "close"):
-            selected.close()
+            _close_backend_quietly(selected)
         raise
     return KernelSession(
         target_path=target,
@@ -263,11 +269,30 @@ def _local_drive_roots() -> tuple[Path, ...]:
     """Return existing Windows drive roots worth probing."""
     if os.name != "nt":
         return ()
+    try:
+        return _win32_fixed_drive_roots()
+    except Exception:
+        pass  # fall back to per-drive probes below on any Win32 failure
     roots: list[Path] = []
     for letter in string.ascii_uppercase:
         drive = Path(f"{letter}:/")
         if drive.exists():
             roots.append(drive)
+    return tuple(roots)
+
+
+def _win32_fixed_drive_roots() -> tuple[Path, ...]:
+    """Enumerate ready fixed drives via Win32 without probing disconnected shares."""
+    import ctypes
+
+    drives_bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    roots: list[Path] = []
+    for index, letter in enumerate(string.ascii_uppercase):
+        if not (drives_bitmask >> index) & 1:
+            continue
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{letter}:\\")
+        if drive_type in (_DRIVE_FIXED, _DRIVE_RAMDISK):
+            roots.append(Path(f"{letter}:/"))
     return tuple(roots)
 
 

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -323,8 +324,11 @@ class LocalParallelRunner:
         self._launch_plans = plans
         self._launch_by_worker = {plan.worker_id: plan for plan in plans}
         self._timeout_s = _require_timeout("timeout_s", timeout_s)
+        self._workers_lock = threading.Lock()
+        self._active_workers: set[JsonlWorkerProcess] = set()
 
     def run(self, plan: FanoutPlan, code: str, *, timeout_s: float | None = None) -> FanoutResult:
+        """Run shards on worker threads; Ctrl+C kills worker subprocesses, then re-raises."""
         if not isinstance(plan, FanoutPlan):
             raise TypeError("plan must be a FanoutPlan")
         code_text = _require_text("code", code, allow_empty=True)
@@ -348,13 +352,39 @@ class LocalParallelRunner:
         )
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join()
+        try:
+            self._join_worker_threads(threads)
+        except KeyboardInterrupt:
+            self._kill_active_workers()
+            self._join_worker_threads(threads)
+            raise
         return FanoutResult.from_results(
             worker_count=plan.worker_count,
             results=tuple(_require_record(record) for record in records),
             elapsed_ms=_elapsed_ms_since(started_ns),
         )
+
+    def _join_worker_threads(self, threads: tuple[threading.Thread, ...]) -> None:
+        """Wait for worker threads; extracted so tests can inject interrupts."""
+        for thread in threads:
+            thread.join()
+
+    def _register_worker(self, worker: JsonlWorkerProcess) -> None:
+        """Track a live worker so Ctrl+C can kill it promptly."""
+        with self._workers_lock:
+            self._active_workers.add(worker)
+
+    def _unregister_worker(self, worker: JsonlWorkerProcess) -> None:
+        """Stop tracking a worker once its close path runs."""
+        with self._workers_lock:
+            self._active_workers.discard(worker)
+
+    def _kill_active_workers(self) -> None:
+        """Kill every live worker subprocess; workers are disposable."""
+        with self._workers_lock:
+            workers = tuple(self._active_workers)
+        for worker in workers:
+            worker.kill()
 
     def _run_worker_shards(
         self,
@@ -375,6 +405,7 @@ class LocalParallelRunner:
                     if worker is None:
                         worker = JsonlWorkerProcess(launch)
                         worker.start()
+                        self._register_worker(worker)
                     request = build_worker_request(shard=shard, code=code)
                     response = worker.request(request, timeout_s=timeout_s)
                     records[index] = worker_response_to_result(
@@ -398,6 +429,7 @@ class LocalParallelRunner:
                         crash=timeout.as_crash(),
                     )
                     if worker is not None:
+                        self._unregister_worker(worker)
                         worker.close()
                         worker = None
                 except WorkerProcessCrash as exc:
@@ -409,6 +441,7 @@ class LocalParallelRunner:
                         crash=WorkerCrash(spec.worker_id, shard.shard_id, exc.returncode, exc.message, exc.stderr_tail),
                     )
                     if worker is not None:
+                        self._unregister_worker(worker)
                         worker.close()
                         worker = None
                 except Exception as exc:
@@ -420,10 +453,12 @@ class LocalParallelRunner:
                         error=WorkerError.from_exception(spec.worker_id, shard.shard_id, exc),
                     )
                     if worker is not None:
+                        self._unregister_worker(worker)
                         worker.close()
                         worker = None
         finally:
             if worker is not None:
+                self._unregister_worker(worker)
                 worker.close()
 
 
@@ -433,17 +468,20 @@ def plan_database_snapshots(
     worker_count: int,
     snapshot_dir: str | os.PathLike[str],
     worker_prefix: str = "worker",
+    run_id: str | None = None,
 ) -> tuple[DatabaseSnapshotPlan, ...]:
+    """Plan per-worker database copies with a run-unique name component."""
     target = Path(_require_text("target_path", os.fspath(target_path)))
     root = Path(_require_text("snapshot_dir", os.fspath(snapshot_dir)))
     count = _require_int("worker_count", worker_count, minimum=1)
     prefix = _require_text("worker_prefix", worker_prefix)
+    token = secrets.token_hex(4) if run_id is None else _require_text("run_id", run_id)
     return tuple(
         DatabaseSnapshotPlan(
             worker_id=f"{prefix}-{index:03d}",
             index=index,
             source_path=str(target),
-            snapshot_path=str(root / _snapshot_name(target, prefix, index)),
+            snapshot_path=str(root / _snapshot_name(target, prefix, index, token)),
         )
         for index in range(count)
     )
@@ -454,29 +492,40 @@ def prepare_database_snapshots(
     *,
     overwrite: bool = False,
 ) -> DatabaseSnapshotManifest:
+    """Copy databases per plan; on failure, delete copies made by this call."""
     records: list[dict[str, Any]] = []
+    created: list[Path] = []
     byte_count = 0
-    for plan in _snapshot_plan_tuple(plans):
-        source = Path(plan.source_path)
-        destination = Path(plan.snapshot_path)
-        if not source.is_file():
-            raise FileNotFoundError(plan.source_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() and not overwrite:
-            raise FileExistsError(plan.snapshot_path)
-        shutil.copy2(source, destination)
-        size = destination.stat().st_size
-        byte_count += size
-        records.append(
-            {
-                "worker_id": plan.worker_id,
-                "index": plan.index,
-                "source_path": plan.source_path,
-                "snapshot_path": plan.snapshot_path,
-                "byte_count": size,
-                "mode": plan.mode,
-            }
-        )
+    try:
+        for plan in _snapshot_plan_tuple(plans):
+            source = Path(plan.source_path)
+            destination = Path(plan.snapshot_path)
+            if not source.is_file():
+                raise FileNotFoundError(plan.source_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() and not overwrite:
+                raise FileExistsError(plan.snapshot_path)
+            shutil.copy2(source, destination)
+            created.append(destination)
+            size = destination.stat().st_size
+            byte_count += size
+            records.append(
+                {
+                    "worker_id": plan.worker_id,
+                    "index": plan.index,
+                    "source_path": plan.source_path,
+                    "snapshot_path": plan.snapshot_path,
+                    "byte_count": size,
+                    "mode": plan.mode,
+                }
+            )
+    except Exception:
+        for destination in created:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     return DatabaseSnapshotManifest(len(records), byte_count, tuple(records))
 
 
@@ -635,10 +684,11 @@ class _TextTail:
             return self._text
 
 
-def _snapshot_name(target: Path, prefix: str, index: int) -> str:
+def _snapshot_name(target: Path, prefix: str, index: int, run_id: str) -> str:
+    """Return a snapshot name unique to one planning call (no cross-run collisions)."""
     stem = target.stem if target.name else "database"
     suffix = target.suffix
-    return f"{stem}.{prefix}-{index:03d}{suffix}"
+    return f"{stem}.{prefix}-{index:03d}.{run_id}{suffix}"
 
 
 def _snapshot_plan_tuple(plans: Iterable[DatabaseSnapshotPlan]) -> tuple[DatabaseSnapshotPlan, ...]:
