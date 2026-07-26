@@ -1,6 +1,6 @@
 ---
 name: ida-cli
-description: Use this skill when Codex needs to drive local IDA Pro or Hex-Rays through the IDA-CLI AI-only JSONL kernel, integrate IDA with Codex or Claude Code style agents, run IDAPython/idalib analysis from a CLI subprocess, collect artifacts, use AI helper APIs, persist caches, merge mutation records, or inspect binaries without opening IDA GUI panels.
+description: Use this skill when Codex needs to drive local IDA Pro or Hex-Rays through the IDA-CLI AI-only JSONL kernel, integrate IDA with Codex or Kimi Code style agents, run IDAPython/idalib analysis from a CLI subprocess, collect artifacts, use AI helper APIs, persist caches, merge mutation records, or inspect binaries without opening IDA GUI panels.
 ---
 
 # IDA-CLI

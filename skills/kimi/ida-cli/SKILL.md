@@ -1,21 +1,15 @@
 ---
 name: ida-cli
-description: Drive local IDA Pro or Hex-Rays through the IDA-CLI AI-only JSONL kernel from Claude Code. Use when Claude Code needs IDAPython/idalib analysis from a CLI subprocess, artifact-backed reverse-engineering output, AI helper APIs, persistent cache reuse, mutation conflict merging, or binary inspection without opening IDA GUI panels.
-allowed-tools:
-  - Bash(python *)
-  - Bash(python3 *)
-  - Bash(py *)
-  - Bash(ida-ai *)
+description: Use this skill when Kimi Code needs to drive local IDA Pro or Hex-Rays through the IDA-CLI AI-only JSONL kernel, run IDAPython/idalib analysis from a CLI subprocess, collect artifacts, use AI helper APIs, persist caches, merge mutation records, or inspect binaries without opening IDA GUI panels.
+whenToUse: When the user asks to analyze, reverse-engineer, inspect, or patch a binary with IDA Pro / IDAPython / idalib, or to use the ida-cli JSONL kernel, ai.* helpers, artifacts, caches, or mutation merging.
 ---
 
 # IDA-CLI
 
-Use this skill from a cloned `IDA-CLI` repository or a copied skill tree. The
-`ida-cli` Python package supplies `ida-ai` and `AgentSession`, but the skill
-files themselves come from the repository distribution. The runtime is AI-only:
-one target argument, stdin JSONL requests, stdout JSONL responses,
-unrestricted Python execution, persistent globals, and artifact-backed large
-outputs.
+Use the repository that contains `pyproject.toml` with project name `ida-cli`.
+The runtime is AI-only: one target argument, stdin JSONL requests, stdout JSONL
+responses, unrestricted Python execution, persistent globals, and artifact-
+backed large outputs.
 
 The supported IDA surface is `IDA Pro 9.0+` simple-open idalib workflows. This
 skill does not expose the extra loader-argument variants that IDA 9.1/9.2 added
@@ -25,8 +19,8 @@ to `open_database()`.
 
 From the repository root:
 
-```bash
-cd <IDA_ROOT>/idalib/python
+```powershell
+cd <IDA_ROOT>\idalib\python
 python -m pip install idapro
 python py-activate-idalib.py
 
@@ -42,9 +36,9 @@ Full-drive discovery is slow and off by default; opt into it with
 In WSL, `AgentSession` auto-detects the Windows Python with idapro and converts
 paths automatically. Set `IDA_CLI_PYTHON` to override.
 
-## Use From Claude Code
+## Agent Bridge
 
-Prefer a short Python driver that keeps one subprocess alive:
+Prefer the importable bridge for Kimi Code runs:
 
 ```python
 from ida_cli.agent_bridge import AgentSession
@@ -60,9 +54,20 @@ globals, imports, and caches are reused.
 times out hung requests by default; pass `timeout_s=` per request for known slow
 decompiler work.
 
+## Protocol
+
+Every request is one strict JSON object with a `code` string and optional `id`.
+The runtime executes `exec(code, globals_env, globals_env)` and serializes
+`__result__`. Python stdout/stderr are captured into response fields.
+
 ## Required First Probe
 
-For IDA work, probe `__backend__` first and require `ida_available`.
+For IDA work, probe `__backend__` first and require `ida_available`:
+
+```python
+backend = ida.probe_backend(require_ida=True)
+```
+
 Python-only mode is useful for protocol tests but is not binary analysis.
 
 ## Common Workflows
@@ -148,7 +153,7 @@ Read returned artifact paths instead of bloating JSONL responses.
 
 ## Verify Changes
 
-```bash
+```powershell
 python -B -m unittest discover -s tests -v
 python -B -m compileall -q src tests benches examples scripts
 ```

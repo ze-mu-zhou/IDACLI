@@ -1,4 +1,4 @@
-"""Tests for GitHub-distributed Codex and Claude Code skills."""
+"""Tests for GitHub-distributed Codex and Kimi Code skills."""
 
 from __future__ import annotations
 
@@ -15,36 +15,33 @@ ROOT = Path(__file__).resolve().parents[1]
 class SkillDistributionTests(unittest.TestCase):
     """Validate that repo skills are installable without external tooling."""
 
-    def test_codex_and_claude_skill_frontmatter_is_valid(self) -> None:
+    def test_skill_frontmatter_is_valid(self) -> None:
         codex = _frontmatter(ROOT / "skills" / "codex" / "ida-cli" / "SKILL.md")
-        claude = _frontmatter(ROOT / "skills" / "claude" / "ida-cli" / "SKILL.md")
-        project_claude = _frontmatter(ROOT / ".claude" / "skills" / "ida-cli" / "SKILL.md")
+        kimi = _frontmatter(ROOT / "skills" / "kimi" / "ida-cli" / "SKILL.md")
 
         self.assertEqual(codex["name"], "ida-cli")
         self.assertIn("Codex", codex["description"])
-        self.assertEqual(claude["name"], "ida-cli")
-        self.assertIn("Claude Code", claude["description"])
-        self.assertIn("allowed-tools", claude)
-        self.assertEqual(claude, project_claude)
+        self.assertEqual(kimi["name"], "ida-cli")
+        self.assertIn("Kimi Code", kimi["description"])
 
     def test_install_script_copies_both_skill_flavors(self) -> None:
         script = ROOT / "scripts" / "install_skill.py"
         with tempfile.TemporaryDirectory() as tmp:
             codex_root = Path(tmp) / "codex-skills"
-            claude_root = Path(tmp) / "claude-skills"
+            kimi_root = Path(tmp) / "kimi-skills"
             all_root = Path(tmp) / "all-skills"
             codex = _run_install(script, "codex", codex_root)
-            claude = _run_install(script, "claude", claude_root)
+            kimi = _run_install(script, "kimi", kimi_root)
             both = _run_install(script, "all", all_root)
 
             self.assertTrue((codex_root / "ida-cli" / "SKILL.md").is_file())
             self.assertTrue((codex_root / "ida-cli" / "agents" / "openai.yaml").is_file())
-            self.assertTrue((claude_root / "ida-cli" / "SKILL.md").is_file())
+            self.assertTrue((kimi_root / "ida-cli" / "SKILL.md").is_file())
             self.assertTrue((all_root / "codex" / "ida-cli" / "SKILL.md").is_file())
-            self.assertTrue((all_root / "claude" / "ida-cli" / "SKILL.md").is_file())
+            self.assertTrue((all_root / "kimi" / "ida-cli" / "SKILL.md").is_file())
             self.assertEqual(codex["installed"][0]["agent"], "codex")
-            self.assertEqual(claude["installed"][0]["agent"], "claude")
-            self.assertEqual([item["agent"] for item in both["installed"]], ["codex", "claude"])
+            self.assertEqual(kimi["installed"][0]["agent"], "kimi")
+            self.assertEqual([item["agent"] for item in both["installed"]], ["codex", "kimi"])
 
 
 def _run_install(script: Path, agent: str, root: Path) -> dict[str, object]:
