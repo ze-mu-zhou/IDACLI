@@ -110,6 +110,15 @@ python -m pip install -e .
 
 ### 3. 安装 Agent Skill
 
+Codex 可直接通过 GitHub 安装，无需先克隆仓库：
+
+```text
+使用 $skill-installer 安装：
+https://github.com/ze-mu-zhou/IDACLI/tree/main/skills/codex/ida-cli
+```
+
+以下命令用于已经克隆仓库的本地安装：
+
 ```bash
 # 安装所有 Agent 风格
 python scripts/install_skill.py all --force

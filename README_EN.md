@@ -111,6 +111,15 @@ python -m pip install -e .
 
 ### 3. Install Agent Skills
 
+Codex can install directly from GitHub without cloning the repository first:
+
+```text
+Use $skill-installer to install:
+https://github.com/ze-mu-zhou/IDACLI/tree/main/skills/codex/ida-cli
+```
+
+Use the commands below when installing from an existing local clone:
+
 ```bash
 # All flavors
 python scripts/install_skill.py all --force

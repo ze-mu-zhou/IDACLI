@@ -36,6 +36,35 @@ Full-drive discovery is slow and off by default; opt into it with
 In WSL, `AgentSession` auto-detects the Windows Python with idapro and converts
 paths automatically. Set `IDA_CLI_PYTHON` to override.
 
+## Required Readiness Check
+
+Before opening a real target or starting `AgentSession`, run:
+
+```powershell
+ida-ai doctor
+```
+
+Proceed only when the JSONL result reports `status: "ready"` and
+`license_accepted: true`. The result also identifies the active IDA root,
+version, `.hexlic` file, license terms, and idapro configuration file.
+
+If the CLI reports `IdaLicenseNotAcceptedError`, stop the target startup and
+run the explicit one-time repair:
+
+```powershell
+ida-ai doctor --fix-license
+```
+
+That command launches the configured official IDA executable, waits for the
+user to review and accept Hex-Rays' terms and close IDA, then retries idapro in
+an isolated subprocess. Never click the acceptance control for the user, write
+an undocumented acceptance marker, patch licensing files, or silently downgrade
+to the Python-only backend. Acceptance is per OS user, so service and CI accounts
+must pass the same readiness check.
+
+For other doctor failures, preserve the structured `details` object and fix the
+reported IDA path, idapro installation, or license-file problem before analysis.
+
 ## Agent Bridge
 
 Prefer the importable bridge for Kimi Code runs:
@@ -54,6 +83,12 @@ globals, imports, and caches are reused.
 times out hung requests by default; pass `timeout_s=` per request for known slow
 decompiler work.
 
+`AgentSession.start(..., require_ida=True)` raises
+`AgentBridgeLicenseError` for the same one-time acceptance state. Catch it
+separately from `AgentBridgeError`, report the actionable doctor command, and
+do not retry the target in a loop. Raw `ida-ai` startup reports the equivalent
+state as `IdaLicenseNotAcceptedError` in its JSONL error envelope.
+
 ## Protocol
 
 Every request is one strict JSON object with a `code` string and optional `id`.
@@ -62,7 +97,8 @@ The runtime executes `exec(code, globals_env, globals_env)` and serializes
 
 ## Required First Probe
 
-For IDA work, probe `__backend__` first and require `ida_available`:
+After doctor reports ready, probe `__backend__` first and require
+`ida_available` for every IDA work session:
 
 ```python
 backend = ida.probe_backend(require_ida=True)

@@ -64,6 +64,30 @@ python -m pip install -e .
 
 ## 3. Install the skill files
 
+### Install Codex skill directly from GitHub
+
+Prefer Codex's built-in `$skill-installer` when no local clone is needed. Ask
+Codex to install this exact GitHub path:
+
+```text
+Use $skill-installer to install:
+https://github.com/ze-mu-zhou/IDACLI/tree/main/skills/codex/ida-cli
+```
+
+The equivalent skill-installer helper arguments are:
+
+```text
+install-skill-from-github.py --repo ze-mu-zhou/IDACLI --ref main --path skills/codex/ida-cli
+```
+
+The installer refuses to overwrite an existing skill. For a clean reinstall,
+first verify and remove only the installed
+`<CODEX_HOME>/skills/ida-cli` directory, then repeat the GitHub installation.
+Do not remove the IDA-CLI development clone. The newly installed skill is
+available to Codex on the next turn.
+
+### Install from a local clone
+
 Install both agent flavors:
 
 ```text

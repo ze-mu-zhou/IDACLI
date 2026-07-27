@@ -24,6 +24,26 @@ class SkillDistributionTests(unittest.TestCase):
         self.assertEqual(kimi["name"], "ida-cli")
         self.assertIn("Kimi Code", kimi["description"])
 
+    def test_both_skills_require_readiness_and_preserve_license_errors(self) -> None:
+        for agent in ("codex", "kimi"):
+            with self.subTest(agent=agent):
+                text = (ROOT / "skills" / agent / "ida-cli" / "SKILL.md").read_text(encoding="utf-8")
+                self.assertIn("ida-ai doctor", text)
+                self.assertIn("ida-ai doctor --fix-license", text)
+                self.assertIn("IdaLicenseNotAcceptedError", text)
+                self.assertIn("AgentBridgeLicenseError", text)
+                self.assertIn('license_accepted: true', text)
+                self.assertIn("Never click the acceptance control for the user", text)
+
+    def test_agent_install_guide_documents_github_install_and_clean_reinstall(self) -> None:
+        text = (ROOT / "docs" / "AI_INSTALL.md").read_text(encoding="utf-8")
+
+        self.assertIn("$skill-installer", text)
+        self.assertIn("ze-mu-zhou/IDACLI", text)
+        self.assertIn("skills/codex/ida-cli", text)
+        self.assertIn("install-skill-from-github.py", text)
+        self.assertIn("Do not remove the IDA-CLI development clone", text)
+
     def test_install_script_copies_both_skill_flavors(self) -> None:
         script = ROOT / "scripts" / "install_skill.py"
         with tempfile.TemporaryDirectory() as tmp:
