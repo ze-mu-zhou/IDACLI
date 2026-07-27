@@ -339,16 +339,17 @@ def _pid_alive(pid: int) -> bool:
         import ctypes
         import ctypes.wintypes
 
-        handle = ctypes.windll.kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        kernel32 = getattr(ctypes, "windll").kernel32
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return False
         try:
             exit_code = ctypes.wintypes.DWORD()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
                 return False
             return exit_code.value == _STILL_ACTIVE
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except OSError:
