@@ -444,7 +444,7 @@ class LocalParallelRunner:
                         self._unregister_worker(worker)
                         worker.close()
                         worker = None
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - worker boundary serializes arbitrary failures.
                     records[index] = WorkerResult.from_error(
                         worker_id=spec.worker_id,
                         shard_id=shard.shard_id,

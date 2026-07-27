@@ -63,7 +63,7 @@ def wsl_to_win(wsl_path: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
     return _fallback_wsl_to_win(wsl_path)
 
@@ -77,7 +77,7 @@ def win_to_wsl(win_path: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
     return _fallback_win_to_wsl(win_path)
 
@@ -95,7 +95,7 @@ def _check_python(python_exe: str) -> str | None:
         )
         if result.returncode == 0:
             return python_exe
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     return None
 

@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = install(args.agent, target_root=args.target_root, force=args.force)
         exit_code = 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI must serialize unexpected installer failures.
         result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}
         exit_code = 1
     print(json.dumps(result, allow_nan=False, sort_keys=True, separators=(",", ":")))

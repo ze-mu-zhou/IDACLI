@@ -590,7 +590,7 @@ def _ida_call(module_name: str, attr: str) -> Any:
         return None
     try:
         return getter()
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional IDA getters expose no stable exception contract.
         return None
 
 

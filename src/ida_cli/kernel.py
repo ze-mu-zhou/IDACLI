@@ -71,7 +71,7 @@ def _close_backend_quietly(backend: Any) -> None:
     """Swallow close failures so cleanup never masks the primary error."""
     try:
         backend.close()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - cleanup must tolerate arbitrary backend implementations.
         print(f"ida-cli kernel: backend close failed during cleanup: {exc}", file=sys.stderr)
 
 
@@ -274,7 +274,7 @@ def _local_drive_roots() -> tuple[Path, ...]:
         return ()
     try:
         return _win32_fixed_drive_roots()
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort ctypes probe falls back to drive checks.
         pass  # fall back to per-drive probes below on any Win32 failure
     roots: list[Path] = []
     for letter in string.ascii_uppercase:

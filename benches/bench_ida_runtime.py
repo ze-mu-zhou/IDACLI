@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         payload = run_benchmark(args)
         exit_code = 0
-    except Exception as exc:  # pragma: no cover - validated through subprocess shape.
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - top-level JSON error envelope
         payload = _error_payload(exc)
         exit_code = 1
     print(json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":")))

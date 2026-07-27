@@ -28,6 +28,7 @@ import queue
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -174,17 +175,17 @@ def _get_connect_host() -> str:
     if os.name != "nt" and Path("/proc/sys/fs/binfmt_misc/WSLInterop").is_file():
         try:
             returncode, output = _run_text(["ip", "route", "show", "default"])
-            if returncode == 0 and output.startswith("default via "):
-                return output.split()[2]
-        except Exception:
+            fields = output.split()
+            if returncode == 0 and fields[:2] == ["default", "via"] and len(fields) >= 3:
+                return fields[2]
+        except (OSError, subprocess.TimeoutExpired):
             pass
     return "127.0.0.1"
 
 
 def _run_text(argv: list[str]) -> tuple[int, str]:
     """Run a console command and decode its stdout without locale crashes."""
-    import subprocess as sp
-    result = sp.run(argv, capture_output=True, timeout=5)
+    result = subprocess.run(argv, capture_output=True, timeout=5)
     return result.returncode, _decode_console_output(result.stdout)
 
 
@@ -211,7 +212,7 @@ def _wsl_to_win_path(linux_path: str) -> str:
         returncode, output = _run_text(["wslpath", "-w", normalized])
         if returncode == 0 and output.strip():
             return output.strip()
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     # Fallback: /tmp/x -> \\wsl$\Debian\tmp\x (best-effort)
     if normalized.startswith("/"):
@@ -227,7 +228,7 @@ def _wsl_distro_name() -> str:
         returncode, output = _run_text(["wsl.exe", "sh", "-c", "echo $WSL_DISTRO_NAME"])
         if returncode == 0 and output.strip():
             return output.strip()
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     return "Debian"
 
@@ -550,7 +551,7 @@ class _MainThreadExecutor:
                 box["error"] = RuntimeError("request abandoned by its caller before execution")
                 return
             box["response"] = self._runtime.execute_request(request)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - async interrupts must still release the waiter.
             box["error"] = exc
         finally:
             # _begin_request lives inside this try on purpose: it takes
@@ -841,7 +842,7 @@ class DaemonServer:
                             stderr="",
                         ),
                     )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread boundary contains and logs handler failures.
             print(f"ida-cli daemon: connection handler failed: {exc!r}", file=sys.stderr)
         finally:
             try:

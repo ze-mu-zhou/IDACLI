@@ -183,7 +183,7 @@ class PythonRuntime:
                 stderr.getvalue(),
                 elapsed_ms,
             )
-        except (Exception, SystemExit) as exc:
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - executed user code is untrusted.
             # SystemExit raised by executed code must become an error
             # envelope; letting it escape would kill the kernel process.
             elapsed_ms = _elapsed_ms(start_ns)
@@ -198,7 +198,7 @@ class PythonRuntime:
 
         try:
             result = prepare_result(self.globals.get("__result__"))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - result conversion can invoke user-defined behavior.
             elapsed_ms = _elapsed_ms(start_ns)
             return self._error_response(
                 request_id,
@@ -385,7 +385,7 @@ def _safe_repr(value: Any) -> str:
     """Bound object repr output; when changing, avoid executing user code twice."""
     try:
         return reprlib.Repr().repr(value)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - repr can execute arbitrary user code.
         return f"<repr failed: {_python_type(exc)}: {exc}>"
 
 

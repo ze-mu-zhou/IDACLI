@@ -386,7 +386,7 @@ class DatabaseMutations:
                 continue
             try:
                 patch_byte(ea + index, old_value)  # range already validated by the read
-            except Exception:
+            except Exception:  # noqa: BLE001 - rollback must never mask the original IDA failure.
                 continue
 
     def _byte_payload(self, data: bytes | bytearray | memoryview | str) -> bytes:

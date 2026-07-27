@@ -493,7 +493,7 @@ class LocalWorkerPool:
                     crash=crash,
                 )
                 self._failed[spec.worker_id] += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - task callbacks may raise arbitrary failures.
                 error = WorkerError.from_exception(spec.worker_id, shard.shard_id, exc)
                 record = WorkerResult.from_error(
                     worker_id=spec.worker_id,

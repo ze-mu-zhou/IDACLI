@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
         session = create_session(target)
     except KeyboardInterrupt:
         return 130  # Ctrl+C during IDA load: exit quietly, no traceback
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - startup crosses untyped IDA and plugin APIs.
         write_jsonl(output_stream, _startup_exception(exc))
         return 1
 
@@ -312,7 +312,7 @@ def _request_protocol_shutdown(target: str) -> bool:
         client.set_read_timeout(_SHUTDOWN_TIMEOUT)
         client.write('{"shutdown": true}\n')
         payload = json.loads(client.readline())
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return False  # connection, timeout, EOF, or garbage — no ack received
     finally:
         client.close()

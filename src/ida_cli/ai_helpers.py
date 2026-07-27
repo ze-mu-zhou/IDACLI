@@ -583,7 +583,7 @@ class AIHelpers:
             if include_decompile:
                 try:
                     record["decompile"] = self.decompile(ea)
-                except Exception as exc:  # pragma: no cover - exact IDA errors vary.
+                except Exception as exc:  # noqa: BLE001  # pragma: no cover - exact IDA errors vary
                     record["decompile_error"] = f"{type(exc).__name__}: {exc}"
             records[key] = record
         return {"count": len(records), "requested": len(target_values), "targets": records}
