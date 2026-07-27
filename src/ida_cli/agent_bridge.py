@@ -13,6 +13,7 @@ from os import PathLike
 from typing import IO, Any, Self
 
 from .daemon import DaemonClient, is_daemon_running
+from .doctor import license_not_accepted_message, text_requires_license_acceptance
 from .protocol import encode_jsonl
 from .wsl import find_ida_python, is_wsl, wsl_to_win
 
@@ -34,6 +35,10 @@ class AgentBridgeError(RuntimeError):
 
 class AgentBridgeTimeoutError(AgentBridgeError):
     """Raised when a kernel request does not produce a JSONL response in time."""
+
+
+class AgentBridgeLicenseError(AgentBridgeError):
+    """Raised when IDA requires one-time license acceptance before headless use."""
 
 
 class AgentSession:
@@ -149,24 +154,33 @@ class AgentSession:
             # Keep the daemon's stderr so startup failures stay diagnosable.
             stderr_file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
             try:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     (*argv, "--daemon", target),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr_file,
                 )
-            except Exception:
-                stderr_file.close()
-                raise
-            deadline = _time.monotonic() + _DAEMON_STARTUP_TIMEOUT
-            while not is_daemon_running(target):
-                if _time.monotonic() > deadline:
+                deadline = _time.monotonic() + _DAEMON_STARTUP_TIMEOUT
+                while not is_daemon_running(target):
+                    returncode = process.poll()
+                    if returncode is not None:
+                        process.wait()
+                        tail = _stream_tail(stderr_file, _DAEMON_STDERR_TAIL_CHARS)
+                        if text_requires_license_acceptance(tail):
+                            raise AgentBridgeLicenseError(license_not_accepted_message())
+                        raise AgentBridgeError(
+                            f"Daemon exited with code {returncode} before startup for {target!r}; "
+                            f"daemon stderr tail: {tail!r}"
+                        )
+                    if _time.monotonic() <= deadline:
+                        _time.sleep(0.1)
+                        continue
+                    _stop_process(process)
                     tail = _stream_tail(stderr_file, _DAEMON_STDERR_TAIL_CHARS)
-                    stderr_file.close()
                     raise AgentBridgeError(
                         f"Daemon did not start within {_DAEMON_STARTUP_TIMEOUT}s for {target!r}; "
                         f"daemon stderr tail: {tail!r}"
                     )
-                _time.sleep(0.1)
-            stderr_file.close()
+            finally:
+                stderr_file.close()
             session = cls.connect(target, request_timeout_s=request_timeout_s)
         if probe_backend or require_ida:
             try:
@@ -203,7 +217,7 @@ class AgentSession:
             # and the daemon would still execute them (see _poison_daemon).
             raise AgentBridgeError(self._daemon_poison)
         if self._process is not None and self._process.poll() is not None:
-            raise AgentBridgeError(self._dead_process_message())
+            raise _dead_process_error(self._dead_process_message())
         request: dict[str, Any] = {"code": code}
         if request_id is not _OMIT_ID:
             request["id"] = request_id
@@ -217,7 +231,7 @@ class AgentSession:
 
         response = self.execute(code, request_id, timeout_s=timeout_s)
         if response.get("ok") is not True:
-            raise AgentBridgeError(_response_error_message(response), response=response)
+            raise _bridge_error_from_response(response)
         return response.get("result")
 
     def close(self) -> None:
@@ -302,7 +316,7 @@ class AgentSession:
                 f"kernel response timed out after {timeout_s:.3f}s; stderr_tail={self._stderr_tail()!r}"
             ) from exc
         if queued is None:
-            raise AgentBridgeError(self._dead_process_message())
+            raise _dead_process_error(self._dead_process_message())
         return self._parse_response(queued)
 
     def _read_daemon_line(self, timeout_s: float) -> str:
@@ -408,6 +422,21 @@ def _stream_tail(stream: IO[str], max_chars: int) -> str:
     return tail
 
 
+def _stop_process(process: subprocess.Popen[Any]) -> None:
+    """Terminate and reap a failed daemon startup subprocess."""
+
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass  # the process may have exited between poll() and terminate()
+    try:
+        process.wait(timeout=_CLOSE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _response_error_message(response: Mapping[str, Any]) -> str:
     error = response.get("error")
     if not isinstance(error, Mapping):
@@ -415,6 +444,22 @@ def _response_error_message(response: Mapping[str, Any]) -> str:
     error_type = error.get("type", "Error")
     message = error.get("message", "")
     return f"{error_type}: {message}"
+
+
+def _bridge_error_from_response(response: Mapping[str, Any]) -> AgentBridgeError:
+    """Preserve a distinct exception for the one actionable IDA startup state."""
+    message = _response_error_message(response)
+    error = response.get("error")
+    error_type = error.get("type") if isinstance(error, Mapping) else None
+    if error_type == "IdaLicenseNotAcceptedError" or text_requires_license_acceptance(message):
+        return AgentBridgeLicenseError(license_not_accepted_message(), response=response)
+    return AgentBridgeError(message, response=response)
+
+
+def _dead_process_error(message: str) -> AgentBridgeError:
+    if text_requires_license_acceptance(message):
+        return AgentBridgeLicenseError(license_not_accepted_message())
+    return AgentBridgeError(message)
 
 
 def _start_stdout_reader(stream: IO[str], output: queue.Queue[str | None]) -> threading.Thread:
@@ -439,7 +484,7 @@ def _join_thread(thread: threading.Thread | None) -> None:
 def _validate_response_id(request: Mapping[str, Any], response: Mapping[str, Any]) -> None:
     # Startup/out-of-band errors have no request id — surface the real error
     if "id" in request and "id" not in response and response.get("ok") is False:
-        raise AgentBridgeError(_response_error_message(response), response=dict(response))
+        raise _bridge_error_from_response(response)
     if "id" in request and response.get("id") != request["id"]:
         raise AgentBridgeError("kernel response id does not match request id")
     if "id" not in request and "id" in response:
@@ -468,4 +513,4 @@ def _require_timeout(name: str, value: float) -> float:
     return timeout
 
 
-__all__ = ("AgentBridgeError", "AgentBridgeTimeoutError", "AgentSession")
+__all__ = ("AgentBridgeError", "AgentBridgeLicenseError", "AgentBridgeTimeoutError", "AgentSession")

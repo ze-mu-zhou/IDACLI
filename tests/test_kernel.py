@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from ida_cli import kernel
+from ida_cli.doctor import IdaLicenseNotAcceptedError
 from ida_cli.kernel import BackendInfo, IdaLibBackend, KernelError, PythonOnlyBackend, create_session
 
 
@@ -142,6 +143,14 @@ class KernelTests(unittest.TestCase):
             with mock.patch.object(kernel, "_wait_for_auto_analysis"):
                 with self.assertRaisesRegex(KernelError, "error code 13"):
                     backend.open("sample.i64")
+
+    def test_idalib_backend_classifies_license_acceptance_failure(self) -> None:
+        fake = FakeIdaPro(open_error=RuntimeError("License not yet accepted, cannot run in batch mode"))
+        backend = IdaLibBackend(fake)
+
+        with mock.patch.object(kernel, "_prepare_idalib_import_path"):
+            with self.assertRaisesRegex(IdaLicenseNotAcceptedError, "doctor --fix-license"):
+                backend.open("sample.i64")
 
     def test_wait_for_auto_analysis_rejects_false(self) -> None:
         ida_auto = types.SimpleNamespace(auto_wait=lambda: False)

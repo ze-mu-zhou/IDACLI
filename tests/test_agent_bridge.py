@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 from unittest import mock
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -20,7 +22,7 @@ if str(SRC) not in sys.path:
 
 from ida_cli import agent_bridge as agent_bridge_mod
 from ida_cli import daemon as daemon_mod
-from ida_cli.agent_bridge import AgentBridgeError, AgentBridgeTimeoutError, AgentSession
+from ida_cli.agent_bridge import AgentBridgeError, AgentBridgeLicenseError, AgentBridgeTimeoutError, AgentSession
 
 
 def _python_only_command() -> tuple[str, ...]:
@@ -35,6 +37,19 @@ def _python_only_command() -> tuple[str, ...]:
         "raise SystemExit(main_mod.main())"
     )
     return (sys.executable, "-B", "-c", code)
+
+
+def _recording_popen(processes: list[subprocess.Popen[bytes]]) -> Callable[..., subprocess.Popen[bytes]]:
+    """Return a real Popen wrapper that keeps spawned processes observable to tests."""
+
+    real_popen = subprocess.Popen
+
+    def record(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    return record
 
 
 class AgentBridgeTests(unittest.TestCase):
@@ -68,6 +83,20 @@ class AgentBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentBridgeError, "IDA backend required"):
             AgentSession.start("sample.i64", command=_python_only_command(), require_ida=True)
 
+    def test_result_preserves_distinct_license_acceptance_error(self) -> None:
+        response = {
+            "ok": False,
+            "error": {
+                "type": "IdaLicenseNotAcceptedError",
+                "message": "IDA license terms have not been accepted",
+            },
+        }
+        session = AgentSession()
+
+        with mock.patch.object(session, "execute", return_value=response):
+            with self.assertRaisesRegex(AgentBridgeLicenseError, "doctor --fix-license"):
+                session.result("__result__ = 1")
+
     def test_agent_session_rejects_mismatched_response_id(self) -> None:
         command = _one_response_command('{"id":"wrong","ok":true,"result":1}')
         with AgentSession.start("sample.i64", command=command) as session:
@@ -94,11 +123,31 @@ class AgentBridgeTests(unittest.TestCase):
             "-c",
             "import sys; sys.stderr.write('daemon boom evidence'); sys.stderr.flush(); sys.exit(3)",
         )
+        processes: list[subprocess.Popen[bytes]] = []
+
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.dict(os.environ, {"IDA_CLI_DAEMON_DIR": temp_dir}), \
-                 mock.patch.object(agent_bridge_mod, "_DAEMON_STARTUP_TIMEOUT", 0.5):
+                 mock.patch.object(agent_bridge_mod, "_DAEMON_STARTUP_TIMEOUT", 0.5), \
+                 mock.patch.object(agent_bridge_mod.subprocess, "Popen", side_effect=_recording_popen(processes)):
                 with self.assertRaisesRegex(AgentBridgeError, "daemon boom evidence"):
                     AgentSession.start("D:/targets/failing-daemon.exe", command=command, daemon=True)
+
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(processes[0].returncode, 3)
+
+    def test_daemon_startup_timeout_reaps_hung_process(self) -> None:
+        command = (sys.executable, "-B", "-c", "import time; time.sleep(30)")
+        processes: list[subprocess.Popen[bytes]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"IDA_CLI_DAEMON_DIR": temp_dir}), \
+                 mock.patch.object(agent_bridge_mod, "_DAEMON_STARTUP_TIMEOUT", 0.2), \
+                 mock.patch.object(agent_bridge_mod.subprocess, "Popen", side_effect=_recording_popen(processes)):
+                with self.assertRaisesRegex(AgentBridgeError, "did not start"):
+                    AgentSession.start("D:/targets/hung-daemon.exe", command=command, daemon=True)
+
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].returncode)
 
 
 class AgentBridgeDaemonTransportTests(unittest.TestCase):

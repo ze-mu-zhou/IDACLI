@@ -13,6 +13,11 @@ from typing import Any
 
 from .ai_helpers import AIHelpers
 from .artifacts import ArtifactStore
+from .doctor import (
+    IdaLicenseNotAcceptedError,
+    exception_requires_license_acceptance,
+    license_not_accepted_message,
+)
 from .runtime import PythonRuntime
 
 _DEEP_DISCOVERY_ENV = "IDA_CLI_DEEP_IDA_DISCOVERY"
@@ -110,11 +115,13 @@ class IdaLibBackend:
     def open(self, target_path: str) -> BackendInfo:
         """Open the target database through idalib and wait for auto-analysis."""
         _prepare_idalib_import_path()
-        idapro = self._idapro if self._idapro is not None else importlib.import_module("idapro")
-        self._idapro = idapro
         try:
+            idapro = self._idapro if self._idapro is not None else importlib.import_module("idapro")
+            self._idapro = idapro
             status = idapro.open_database(target_path, True)
         except Exception as exc:
+            if exception_requires_license_acceptance(exc):
+                raise IdaLicenseNotAcceptedError(license_not_accepted_message()) from exc
             raise KernelError(f"idapro.open_database failed for {target_path!r}: {exc}") from exc
         _require_open_database_success(target_path, status)
         self._database_opened = True
@@ -398,6 +405,7 @@ def _ida_modules() -> dict[str, Any]:
 __all__ = (
     "BackendInfo",
     "IdaLibBackend",
+    "IdaLicenseNotAcceptedError",
     "KernelError",
     "KernelSession",
     "PythonOnlyBackend",

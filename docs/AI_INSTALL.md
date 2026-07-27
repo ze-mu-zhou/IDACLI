@@ -31,6 +31,29 @@ step was skipped, the runtime next checks `IDADIR` and bounded Windows install
 layouts. Full-drive discovery is disabled by default because it is slow; enable
 it only as a last resort on Windows with `IDA_CLI_DEEP_IDA_DISCOVERY=1`.
 
+### One-time IDA license acceptance
+
+Hex-Rays requires each OS user that runs idalib to launch IDA once and accept
+the license terms before batch mode is allowed. A valid `.hexlic` file and a
+loadable `idalib.dll` do not replace this one-time user action.
+
+Use the structured readiness check first:
+
+```text
+ida-ai doctor
+```
+
+If it reports `IdaLicenseNotAcceptedError`, the agent may run:
+
+```text
+ida-ai doctor --fix-license
+```
+
+That command launches the configured official IDA executable, waits for the
+user to review the terms and close IDA, and then retries the isolated `idapro`
+probe. The agent must not click acceptance controls for the user, write an
+undocumented acceptance marker, or alter IDA licensing components.
+
 ## 2. Install the runtime wrapper
 
 From the repository root:

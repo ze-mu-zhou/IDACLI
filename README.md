@@ -88,6 +88,20 @@ python -m pip install idapro
 python py-activate-idalib.py
 ```
 
+Hex-Rays 要求当前系统用户在首次 headless/idalib 运行前接受一次 IDA
+许可条款。IDA-CLI 会明确识别该状态，不会代表用户静默接受：
+
+```bash
+# 只读诊断：显示实际 IDA 路径、版本、许可文件及接受状态
+ida-ai doctor
+
+# 启动一次官方 IDA，等待用户确认并关闭后自动重新探测
+ida-ai doctor --fix-license
+```
+
+`--fix-license` 只会启动检测到的官方 IDA 可执行文件；不会修改 DLL、
+复制注册表接受标记或模拟点击许可按钮。
+
 ### 2. 安装
 
 ```bash

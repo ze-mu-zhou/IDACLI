@@ -535,6 +535,45 @@ class CliFrontDoorTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue().strip(), f"ida-ai {ida_cli.__version__}")
 
+    def test_doctor_success_is_one_jsonl_result(self) -> None:
+        stdout = io.StringIO()
+        details: dict[str, object] = {"status": "ready", "message": "ready"}
+
+        with mock.patch.object(main_mod, "run_doctor", return_value=(0, details)) as doctor:
+            exit_code = main(["doctor"], stdin=io.StringIO(), stdout=stdout)
+
+        payload = _responses(stdout.getvalue())[0]
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"], details)
+        doctor.assert_called_once_with(fix_license=False)
+
+    def test_doctor_fix_license_reports_actionable_error_details(self) -> None:
+        stdout = io.StringIO()
+        details: dict[str, object] = {
+            "status": "license_not_accepted",
+            "message": "accept once",
+            "installation": {"root": "D:/IDA"},
+        }
+
+        with mock.patch.object(main_mod, "run_doctor", return_value=(1, details)) as doctor:
+            exit_code = main(["doctor", "--fix-license"], stdin=io.StringIO(), stdout=stdout)
+
+        payload = _responses(stdout.getvalue())[0]
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "IdaLicenseNotAcceptedError")
+        self.assertEqual(payload["details"], details)
+        doctor.assert_called_once_with(fix_license=True)
+
+    def test_startup_exception_classifies_raw_ida_license_message(self) -> None:
+        payload = main_mod._startup_exception(
+            RuntimeError("License not yet accepted, cannot run in batch mode")
+        )
+
+        self.assertEqual(payload["error"]["type"], "IdaLicenseNotAcceptedError")
+        self.assertIn("doctor --fix-license", payload["error"]["message"])
+
     def test_version_matches_pyproject(self) -> None:
         pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))

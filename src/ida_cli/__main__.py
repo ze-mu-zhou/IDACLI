@@ -13,13 +13,16 @@ from typing import Any, Protocol, TextIO
 from . import __version__
 from . import runtime as runtime_mod
 from .daemon import DaemonRunningError, DaemonServer, is_daemon_running
+from .doctor import exception_requires_license_acceptance, license_not_accepted_message, run_doctor
 from .kernel import KernelSession, create_session
 from .protocol import (
     BadJsonError,
+    ProtocolRequest,
     RequestFormatError,
     bad_json_response,
     error_response,
     parse_request,
+    success_response,
     write_jsonl,
 )
 
@@ -43,6 +46,7 @@ class _RequestExecutor(Protocol):
 _USAGE = """\
 usage: ida-ai [--daemon] <target>
        ida-ai --shutdown [--force] <target>
+       ida-ai doctor [--fix-license]
 
 AI-only IDA runtime: speaks JSONL on stdin/stdout, one request per line.
 Humans should drive it through an agent skill (Kimi Code / Codex), not by hand.
@@ -56,10 +60,23 @@ options:
   --force      with --shutdown: kill a daemon that ignores the shutdown
                protocol, even on Windows where that skips the IDA database
                unload (last resort for a wedged native IDA call)
+  doctor       inspect the configured IDA, idapro, license file, and first-run
+               license acceptance state
+  --fix-license
+               with doctor: launch official IDA for one-time user acceptance,
+               wait for it to exit, then retry the idapro probe
   -h, --help   print this help and exit
   --version    print the installed ida-cli version and exit
 
 docs: https://github.com/ze-mu-zhou/IDACLI (README.md, docs/AI_INSTALL.md)
+"""
+
+_DOCTOR_USAGE = """\
+usage: ida-ai doctor [--fix-license]
+
+Diagnose the configured IDA installation in an isolated idapro subprocess.
+--fix-license launches the official IDA executable; the user reviews and
+accepts Hex-Rays' terms in that window. IDA-CLI never accepts them silently.
 """
 
 
@@ -77,6 +94,8 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     if args and args[0] == "--version":
         output_stream.write(f"ida-ai {__version__}\n")
         return 0
+    if args and args[0] == "doctor":
+        return _run_doctor_cli(args[1:], output_stream)
 
     daemon_mode = False
     if args and args[0] == "--daemon":
@@ -124,6 +143,29 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     finally:
         if not daemon_mode:
             session.close()
+
+
+def _run_doctor_cli(args: list[str], output_stream: TextIO) -> int:
+    """Run the human-triggered but JSONL-reporting IDA readiness diagnostic."""
+    if args and args[0] in ("-h", "--help"):
+        output_stream.write(_DOCTOR_USAGE)
+        return 0
+    if any(arg != "--fix-license" for arg in args) or args.count("--fix-license") > 1:
+        write_jsonl(output_stream, _startup_error("CLIArgumentError", "doctor accepts only --fix-license"))
+        return 2
+
+    exit_code, details = run_doctor(fix_license="--fix-license" in args)
+    if exit_code == 0:
+        write_jsonl(output_stream, success_response(ProtocolRequest(code=""), result=details))
+        return 0
+
+    status = details.get("status")
+    error_type = "IdaLicenseNotAcceptedError" if status == "license_not_accepted" else "IdaDoctorError"
+    message = details.get("message")
+    envelope = _startup_error(error_type, message if isinstance(message, str) else "IDA readiness check failed")
+    envelope["details"] = details
+    write_jsonl(output_stream, envelope)
+    return exit_code
 
 
 def _serve_daemon(target: str, session: KernelSession) -> int:
@@ -477,6 +519,8 @@ def _read_request_line(stream: TextIO, limit: int) -> tuple[str | None, bool]:
 
 def _startup_exception(exc: BaseException) -> dict[str, object]:
     """Convert startup failures into protocol JSON instead of human logs."""
+    if exception_requires_license_acceptance(exc):
+        return _startup_error("IdaLicenseNotAcceptedError", license_not_accepted_message())
     return _startup_error(type(exc).__name__, str(exc))
 
 
