@@ -36,23 +36,32 @@ class ArtifactStore:
 
     @classmethod
     def create(cls, runs_dir: str | os.PathLike[str], run_id: str | None = None) -> "ArtifactStore":
-        """Create a per-run artifact store under ``runs_dir``."""
+        """Create a per-run artifact store under ``runs_dir``.
+
+        The metadata prefix is deliberately run-relative (``artifacts/...``),
+        not cwd-relative (``runs/<id>/artifacts/...``). A cwd-relative value
+        is only resolvable when ``runs_dir`` happens to be relative and the
+        reader happens to share the kernel's working directory; run-relative
+        plus ``run_dir`` in every metadata record is well defined either way.
+        """
         # Allocate once per kernel run; future changes must keep IDs path-safe.
         safe_run_id = _safe_run_id(run_id) if run_id is not None else _new_run_id()
-        runs_path = Path(runs_dir)
-        prefix_parts = _safe_relative_path(runs_path.name or "runs").parts
-        metadata_prefix = PurePosixPath(*prefix_parts, safe_run_id, _ARTIFACT_DIR)
-        return cls(runs_path / safe_run_id, metadata_prefix=metadata_prefix)
+        return cls(Path(runs_dir) / safe_run_id)
 
     @classmethod
     def in_directory(cls, artifact_dir: str | os.PathLike[str]) -> "ArtifactStore":
-        """Create a store that writes directly into one existing artifact directory."""
+        """Create a store that writes directly into one existing artifact directory.
+
+        The store root IS the artifact directory here, so ``artifact`` paths
+        are relative to it and ``run_dir`` names it -- the same contract a
+        run store publishes, just with a flatter layout.
+        """
         # Bind without a run layout; future changes must keep containment identical to run stores.
         path = Path(artifact_dir)
         store = cls.__new__(cls)
         store._run_dir = path
         store._artifact_dir = path
-        store._metadata_prefix = PurePosixPath(path.name or _ARTIFACT_DIR)
+        store._metadata_prefix = PurePosixPath(".")
         store._artifact_dir.mkdir(parents=True, exist_ok=True)
         return store
 
@@ -93,7 +102,7 @@ class ArtifactStore:
         except Exception:
             _remove_if_present(temp)
             raise
-        return _metadata(metadata_path, byte_count, digest.hexdigest(), row_count)
+        return _metadata(metadata_path, byte_count, digest.hexdigest(), row_count, self._run_dir)
 
     def write_binary(self, name: str | os.PathLike[str], data: bytes | bytearray | memoryview) -> dict[str, Any]:
         """Write an exact binary artifact and return metadata."""
@@ -122,15 +131,22 @@ class ArtifactStore:
             _remove_if_present(temp)
             raise
         digest = hashlib.sha256(data).hexdigest()
-        return _metadata(self._metadata_path(name), len(data), digest, count)
+        return _metadata(self._metadata_path(name), len(data), digest, count, self._run_dir)
 
     def _artifact_path(self, name: str | os.PathLike[str]) -> Path:
         """Resolve a safe relative artifact name under the store root."""
         # Validate before joining; future changes must reject absolute paths and traversal.
         relative = _safe_relative_path(name)
         target = self._artifact_dir.joinpath(*relative.parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        # Containment is checked BEFORE anything is created. mkdir(parents=True)
+        # on a name that escapes through an existing symlinked container used to
+        # materialise directories outside the store, and only then raise -- the
+        # write was refused but the layout damage was already done.
+        # This orders creation after validation; it is not a security boundary,
+        # because the only actor that can plant such a link is code running under
+        # the kernel's unrestricted exec, which can already write anywhere.
         _ensure_inside(self._artifact_dir, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         return target
 
     def _metadata_path(self, name: str | os.PathLike[str]) -> str:
@@ -187,6 +203,8 @@ def _validate_part(part: str) -> None:
     # Keep metadata portable; future changes must preserve cross-platform artifact paths.
     if part in {"", ".", ".."}:
         raise ValueError("artifact path must not contain empty, current, or parent parts")
+    if part != part.rstrip(". "):
+        raise ValueError("artifact path must not end in dots or spaces, which Win32 strips")
     device_name = part.split(".", 1)[0].upper()
     if device_name in _WINDOWS_RESERVED:
         raise ValueError("artifact path contains a reserved Windows device name")
@@ -199,10 +217,20 @@ def _json_bytes(value: Any) -> bytes:
     return text.encode("utf-8")
 
 
-def _metadata(path: str, size: int, sha256: str, count: int | None) -> dict[str, Any]:
-    """Build JSON-compatible artifact metadata."""
+def _metadata(path: str, size: int, sha256: str, count: int | None, run_dir: Path) -> dict[str, Any]:
+    """Build JSON-compatible artifact metadata.
+
+    ``artifact`` is relative to ``run_dir``; ``run_dir`` is absolute. A reader
+    resolves the file as ``run_dir / artifact`` without knowing the kernel's
+    working directory, which is the one thing it cannot observe.
+    """
     # Keep response fields stable; future changes must add fields without renaming these.
-    result: dict[str, Any] = {"artifact": path, "size": size, "sha256": sha256}
+    result: dict[str, Any] = {
+        "artifact": path,
+        "run_dir": str(run_dir.resolve()),
+        "size": size,
+        "sha256": sha256,
+    }
     if count is not None:
         result["count"] = count
     return result

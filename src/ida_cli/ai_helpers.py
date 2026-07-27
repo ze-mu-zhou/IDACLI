@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Iterable, Mapping, Sequence
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -30,14 +31,21 @@ class AIHelpers:
         *,
         modules: Mapping[str, Any] | None = None,
         auto_import: bool = True,
+        artifact_store: Any | None = None,
     ) -> None:
         # Keep artifact IO available outside IDA; when changing this, obey path containment checks.
         self._artifact_dir = Path(artifact_dir) if artifact_dir is not None else Path.cwd() / "artifacts"
-        # Bind the store lazily; when changing this, never create directories at import time.
-        self._artifact_store: Any | None = None
+        # Prefer the session's own store. Building a second one over the same
+        # directory used to reset the metadata prefix, so ai.* returned paths
+        # that no longer named the run they belong to; and the module-level
+        # singleton would silently bind cwd/artifacts, letting an agent read a
+        # stale ./artifacts/ tree whose sha256 matched nothing it just wrote.
+        self._artifact_store: Any | None = artifact_store
         # Keep tests deterministic by allowing injected modules; when changing this, obey lazy import semantics.
         self._modules = dict(modules) if modules is not None else {}
         self._auto_import = auto_import
+        # Resolved lazily on first name lookup; see _name_getters().
+        self._name_getter_cache: tuple[Any, ...] | None = None
         from .cache import IDACache
         from .mutations import DatabaseMutations
 
@@ -578,10 +586,30 @@ class AIHelpers:
     def inventory_summary(self, *, function_limit: int = 16, string_limit: int = 16) -> dict[str, Any]:
         """Return a small triage summary instead of full noisy inventories."""
 
-        functions = self.functions()
-        imports = self.imports()
-        strings = self.strings(string_limit)
-        names = self.names()
+        return self._build_inventory_summary(
+            functions=self.functions(),
+            imports=self.imports(),
+            strings=self.strings(string_limit),
+            names=self.names(),
+            function_limit=function_limit,
+        )
+
+    def _build_inventory_summary(
+        self,
+        *,
+        functions: list[dict[str, Any]],
+        imports: list[dict[str, Any]],
+        strings: list[dict[str, Any]],
+        names: list[dict[str, Any]],
+        function_limit: int,
+    ) -> dict[str, Any]:
+        """Summarize inventories the caller already enumerated.
+
+        Split out so export_inventory can share one enumeration with the
+        artifacts it writes: each of these lists costs a full database walk,
+        and building the summary from scratch doubled every one of them.
+        """
+
         return {
             "counts": {
                 "functions": len(functions),
@@ -590,7 +618,9 @@ class AIHelpers:
                 "strings_sampled": len(strings),
             },
             "dangerous_imports": _dangerous_imports(imports),
-            "interesting_functions": _interesting_symbols(functions + names, function_limit),
+            # chain, not functions + names: _interesting_symbols stops at the
+            # limit, so materializing the concatenation is wasted work.
+            "interesting_functions": _interesting_symbols(chain(functions, names), function_limit),
             "string_hits": _interesting_strings(strings),
             "functions": functions[: self._checked_limit(function_limit, "function_limit", allow_zero=True)],
         }
@@ -599,14 +629,21 @@ class AIHelpers:
         """Write common inventories as artifacts and return only metadata."""
 
         base = _artifact_prefix(prefix)
+        # Enumerate each inventory exactly once and feed both the artifacts
+        # and the summary; the summary's string count therefore always
+        # matches the strings artifact beside it.
+        functions = self.functions()
+        imports = self.imports()
+        names = self.names()
         strings = self.strings(string_limit)
-        # Sample what was exported; future changes must keep summary counts consistent with the strings artifact.
-        summary = self.inventory_summary(string_limit=len(strings))
+        summary = self._build_inventory_summary(
+            functions=functions, imports=imports, strings=strings, names=names, function_limit=16
+        )
         return {
             "summary": self.write_artifact(f"{base}/summary.json", summary),
-            "functions": self.write_artifact(f"{base}/functions.jsonl", self.functions()),
-            "imports": self.write_artifact(f"{base}/imports.jsonl", self.imports()),
-            "names": self.write_artifact(f"{base}/names.jsonl", self.names()),
+            "functions": self.write_artifact(f"{base}/functions.jsonl", functions),
+            "imports": self.write_artifact(f"{base}/imports.jsonl", imports),
+            "names": self.write_artifact(f"{base}/names.jsonl", names),
             "strings": self.write_artifact(f"{base}/strings.jsonl", strings),
         }
 
@@ -672,13 +709,34 @@ class AIHelpers:
             return int(ida_name.get_name_ea(self._badaddr(), name))
         raise AIHelperError("name resolution requires idc or ida_name")
 
+    _NAME_GETTER_CANDIDATES = (("idc", "get_func_name"), ("idc", "get_name"), ("ida_funcs", "get_func_name"))
+
+    def _name_getters(self) -> tuple[Any, ...]:
+        """Resolve the name getters once instead of per address.
+
+        This runs for every function, xref endpoint, and CFG node, so the
+        three module lookups plus hasattr/getattr per call dominated large
+        enumerations. Module resolution is already sticky (_optional_module
+        caches imports), so caching the bound callables changes nothing
+        beyond skipping repeated lookup work.
+        """
+
+        cached = self._name_getter_cache
+        if cached is None:
+            resolved = []
+            for module_name, attr in self._NAME_GETTER_CANDIDATES:
+                module = self._optional_module(module_name)
+                if module is not None and hasattr(module, attr):
+                    resolved.append(getattr(module, attr))
+            cached = tuple(resolved)
+            self._name_getter_cache = cached
+        return cached
+
     def _name_or_none(self, ea: int) -> str | None:
-        for module_name, attr in (("idc", "get_func_name"), ("idc", "get_name"), ("ida_funcs", "get_func_name")):
-            module = self._optional_module(module_name)
-            if module is not None and hasattr(module, attr):
-                value = getattr(module, attr)(ea)
-                if value:
-                    return str(value)
+        for getter in self._name_getters():
+            value = getter(ea)
+            if value:
+                return str(value)
         return None
 
     def _function_record(self, ea: int, func: Any | None = None) -> dict[str, Any]:

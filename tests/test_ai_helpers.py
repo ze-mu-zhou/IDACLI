@@ -159,7 +159,7 @@ class AIHelpersTests(unittest.TestCase):
             meta = helper.write_artifact("facts", {"answer": 42})
             payload = (helper_dir / "facts.json").read_bytes()
 
-        self.assertEqual(meta["artifact"], "artifacts/facts.json")
+        self.assertEqual(meta["artifact"], "facts.json")
         self.assertEqual(meta["size"], len(payload))
         self.assertEqual(meta["sha256"], hashlib.sha256(payload).hexdigest())
         self.assertEqual(json.loads(payload), {"answer": 42})
@@ -266,7 +266,7 @@ class AIHelpersTests(unittest.TestCase):
             for key, filename in expected.items():
                 metadata = exported[key]
                 artifact = helper_dir / "triage" / filename
-                self.assertEqual(metadata["artifact"], f"artifacts/triage/{filename}")
+                self.assertEqual(metadata["artifact"], f"triage/{filename}")
                 self.assertEqual(metadata["size"], artifact.stat().st_size)
                 self.assertEqual(metadata["sha256"], hashlib.sha256(artifact.read_bytes()).hexdigest())
 
@@ -283,6 +283,32 @@ class AIHelpersTests(unittest.TestCase):
             strings_rows = (helper_dir / "triage" / "strings.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(strings_rows), 2)
             self.assertEqual(summary["counts"]["strings_sampled"], 2)
+
+    def test_export_inventory_walks_each_inventory_exactly_once(self) -> None:
+        # Every one of these is a full database walk under real IDA; the
+        # summary must reuse the same enumeration the artifacts are built
+        # from rather than repeating it.
+        modules = fake_modules()
+        calls = {"Functions": 0, "Names": 0, "Strings": 0, "enum_import_names": 0}
+        base = {name: getattr(modules["idautils"], name) for name in ("Functions", "Names", "Strings")}
+        base_imports = modules["ida_nalt"].enum_import_names
+
+        def counted(name: str, inner: object) -> object:
+            def wrapper(*args: object) -> object:
+                calls[name] += 1
+                return inner(*args)
+
+            return wrapper
+
+        for name, inner in base.items():
+            setattr(modules["idautils"], name, counted(name, inner))
+        modules["ida_nalt"].enum_import_names = counted("enum_import_names", base_imports)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = AIHelpers(Path(tmp) / "artifacts", modules=modules, auto_import=False)
+            helper.export_inventory("triage")
+
+        self.assertEqual(calls, {"Functions": 1, "Names": 1, "Strings": 1, "enum_import_names": 1})
 
     def test_focus_reports_requested_targets_and_dedupes_identical_keys(self) -> None:
         helper = AIHelpers(modules=fake_modules(), auto_import=False)
@@ -445,7 +471,7 @@ class AIHelpersTests(unittest.TestCase):
             self.assertEqual(functions[0]["name"], "start")
             self.assertIn("return 0", decompiled["pseudocode"])
             self.assertFalse(loaded["status"]["stale"])
-            self.assertEqual(exported["artifact"]["artifact"], "artifacts/cache/index.json")
+            self.assertEqual(exported["artifact"]["artifact"], "cache/index.json")
             self.assertTrue(artifact.is_file())
             self.assertEqual(json.loads(artifact.read_text(encoding="utf-8"))["schema"], "ida-cli-cache-index-v1")
 

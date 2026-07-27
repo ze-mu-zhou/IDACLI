@@ -156,7 +156,10 @@ def create_session(
     backend_info = selected.open(target)
     try:
         artifact_store = ArtifactStore.create(runs_dir)
-        ai = AIHelpers(artifact_store.artifact_dir)
+        # Hand the session's own store to ai.*, so every artifact path an agent
+        # is given names this run. Passing only the directory made AIHelpers
+        # build a second store whose metadata prefix no longer mentioned the run.
+        ai = AIHelpers(artifact_store.artifact_dir, artifact_store=artifact_store)
         initial_globals = _ida_modules()
         initial_globals.update(
             {

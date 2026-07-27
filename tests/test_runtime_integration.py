@@ -142,7 +142,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
         self.assertTrue(response["ok"], response)
         self.assertEqual(response["result"]["refresh"]["stale"], [])
-        self.assertEqual(response["result"]["export"]["artifact"], "runs/cache/artifacts/cache/indexes.json")
+        self.assertEqual(response["result"]["export"]["artifact"], "artifacts/cache/indexes.json")
         self.assertEqual(exported["names"]["start"], 0x401000)
         self.assertEqual(exported["call_edges"][0]["target"], 0x403000)
 
