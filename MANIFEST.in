@@ -17,6 +17,7 @@ recursive-include examples *
 include LICENSE
 include CHANGELOG.md
 include README.md
+include README_EN.md
 
 # Never ship compiled caches or editor cruft.
 global-exclude *.py[cod]
