@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
 from . import __version__
-from .daemon import DaemonServer, is_daemon_running
-from .kernel import create_session
+from . import runtime as runtime_mod
+from .daemon import DaemonRunningError, DaemonServer, is_daemon_running
+from .kernel import KernelSession, create_session
 from .protocol import (
     BadJsonError,
     RequestFormatError,
@@ -26,10 +28,21 @@ _SHUTDOWN_TIMEOUT = 5.0  # seconds to wait for a SIGTERMed daemon to die
 _SHUTDOWN_POLL_INTERVAL = 0.05  # seconds between process-exit polls
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # Win32 OpenProcess access right
 _STILL_ACTIVE = 259  # Win32 exit code for a process that has not exited
+# Executor of the currently serving daemon; the signal handler stops it so a
+# SIGTERM delivered while a request runs still unwinds the serve loop.
+_ACTIVE_EXECUTOR: Any | None = None
+
+class _RequestExecutor(Protocol):
+    """The one method _serve needs: the kernel runtime and the daemon
+    executor both satisfy it, and neither is importable as a common base."""
+
+    def execute_request(self, request: Any) -> dict[str, Any]:
+        """Execute one decoded protocol request and return its envelope."""
+
 
 _USAGE = """\
 usage: ida-ai [--daemon] <target>
-       ida-ai --shutdown <target>
+       ida-ai --shutdown [--force] <target>
 
 AI-only IDA runtime: speaks JSONL on stdin/stdout, one request per line.
 Humans should drive it through an agent skill (Kimi Code / Codex), not by hand.
@@ -39,7 +52,10 @@ arguments:
 
 options:
   --daemon     run as a reusable background kernel for <target>
-  --shutdown   gracefully stop the daemon serving <target> (SIGTERM)
+  --shutdown   gracefully stop the daemon serving <target>
+  --force      with --shutdown: kill a daemon that ignores the shutdown
+               protocol, even on Windows where that skips the IDA database
+               unload (last resort for a wedged native IDA call)
   -h, --help   print this help and exit
   --version    print the installed ida-cli version and exit
 
@@ -53,7 +69,7 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = _guarded_protocol_stdout() if stdout is None else stdout
     if stdin is None:
-        _tolerate_undecodable_stdin(input_stream)
+        _pin_request_stdin_codec(input_stream)
 
     if args and args[0] in ("-h", "--help"):
         output_stream.write(_USAGE)  # plain text for humans; not a JSONL envelope
@@ -67,7 +83,10 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
         daemon_mode = True
         args.pop(0)
     if args and args[0] == "--shutdown":
-        return _shutdown_daemon(args[1] if len(args) > 1 else None, output_stream)
+        rest = args[1:]
+        force = "--force" in rest
+        targets = [item for item in rest if item != "--force"]
+        return _shutdown_daemon(targets[0] if targets else None, output_stream, force=force)
 
     if len(args) != 1:
         write_jsonl(
@@ -87,6 +106,8 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
 
     try:
         session = create_session(target)
+    except KeyboardInterrupt:
+        return 130  # Ctrl+C during IDA load: exit quietly, no traceback
     except Exception as exc:
         write_jsonl(output_stream, _startup_exception(exc))
         return 1
@@ -94,14 +115,20 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
     try:
         if daemon_mode:
             return _serve_daemon(target, session)
-        return _serve(session.runtime, input_stream, output_stream)
+        return _serve_stdio(session, input_stream, output_stream)
+    except DaemonRunningError as exc:
+        # start() lost the O_EXCL race after the CLI-level is_daemon_running
+        # check; the winner owns the target, so report instead of crashing.
+        write_jsonl(output_stream, _startup_error("DaemonRunningError", str(exc)))
+        return 1
     finally:
         if not daemon_mode:
             session.close()
 
 
-def _serve_daemon(target: str, session: object) -> int:
+def _serve_daemon(target: str, session: KernelSession) -> int:
     """Run kernel as a daemon; SIGTERM takes the same graceful path as Ctrl+C."""
+    global _ACTIVE_EXECUTOR
     server = DaemonServer(target, session.runtime)
     previous_sigterm: Any = None
     sigterm_installed = False
@@ -110,31 +137,96 @@ def _serve_daemon(target: str, session: object) -> int:
         sigterm_installed = True
     except (OSError, RuntimeError, ValueError):
         pass  # signal handlers only install on the main thread of the main interpreter
+    runtime_mod._SIGNAL_INTERRUPT.clear()  # never inherit a stale flag
     try:
-        server.start()
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        # getattr tolerates DaemonServer doubles that carry no executor.
+        _ACTIVE_EXECUTOR = getattr(server, "_runtime", None)
+        try:
+            server.start()
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            _ACTIVE_EXECUTOR = None
     finally:
         if sigterm_installed:
             signal.signal(signal.SIGTERM, previous_sigterm)
+        runtime_mod._SIGNAL_INTERRUPT.clear()  # keep one-shot state out of later runs
         server.shutdown()
         session.close()
     return 0
 
 
+def _serve_stdio(session: KernelSession, stdin: TextIO, stdout: TextIO) -> int:
+    """Run the stdio JSONL loop; Ctrl+C escapes the runtime's error envelope.
+
+    Without the SIGINT handler below, a KeyboardInterrupt raised inside
+    executed code would be wrapped into an error envelope and the loop would
+    keep serving, making the kernel unkillable from the keyboard. With the
+    flag set, the runtime re-raises the KI and it is caught here for a clean
+    exit without a traceback.
+    """
+    previous_sigint: Any = None
+    sigint_installed = False
+    try:
+        previous_sigint = signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+        sigint_installed = True
+    except (OSError, RuntimeError, ValueError):
+        pass  # not the main thread (embedded/tests); default handling applies
+    runtime_mod._SIGNAL_INTERRUPT.clear()
+    try:
+        return _serve(session.runtime, stdin, stdout)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if sigint_installed:
+            signal.signal(signal.SIGINT, previous_sigint)
+        runtime_mod._SIGNAL_INTERRUPT.clear()
+
+
 def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
-    """Translate SIGTERM into KeyboardInterrupt so graceful cleanup runs."""
+    """Translate a process signal into a graceful kernel shutdown.
+
+    Sets the signal-interrupt flag so the runtime lets this KeyboardInterrupt
+    escape the error envelope, stops the daemon executor so the serve loop
+    unwinds even when raised mid-request, then raises the KI itself.
+    """
+    runtime_mod._SIGNAL_INTERRUPT.set()
+    executor = _ACTIVE_EXECUTOR
+    if executor is not None:
+        executor.stop()
     raise KeyboardInterrupt
 
 
-def _shutdown_daemon(target: str | None, output_stream: TextIO) -> int:
+def _is_windows() -> bool:
+    """Return whether this host is Windows.
+
+    A seam so tests can select the branch without touching ``os.name``:
+    pathlib binds its PosixPath/WindowsPath platform guard at import time
+    (``class PosixPath: if os.name == 'nt': def __new__(...): raise``), so a
+    patched ``os.name`` makes every Path operation raise UnsupportedOperation
+    on one platform or the other.
+    """
+    return os.name == "nt"
+
+
+def _shutdown_daemon(target: str | None, output_stream: TextIO, *, force: bool = False) -> int:
     """Shut down a running daemon; remove its files only after it actually dies.
+
+    The graceful path is the daemon's shutdown control message (port + token
+    from the registration files), which lets the daemon close its IDA
+    session itself. Only when that protocol fails does POSIX fall back to
+    SIGTERM; Windows does not hard-kill by default, because there SIGTERM
+    *is* TerminateProcess and would skip session.close() and the IDA
+    database unload — the survivor would keep the license and a corrupt
+    database. ``force=True`` (``--shutdown --force``) accepts that damage so
+    an operator always has an escape hatch for a daemon wedged inside an
+    uninterruptible native IDA call.
 
     Exit codes: 0 on confirmed shutdown (files removed), 2 for a missing
     target argument, 1 for NoDaemonError, an unreadable/garbage pid file
     (ValueError envelope), a failed kill (OSError envelope), or a daemon
-    that survives SIGTERM (DaemonShutdownError envelope; files kept).
+    that will not die (DaemonShutdownError envelope; files kept).
     """
     from .daemon import _cleanup_daemon_files, get_pid_path
 
@@ -162,6 +254,30 @@ def _shutdown_daemon(target: str | None, output_stream: TextIO) -> int:
             _startup_error("NoDaemonError", f"No daemon running for {target!r}"),
         )
         return 1
+    if _request_protocol_shutdown(target):
+        if not _wait_for_process_exit(pid):
+            write_jsonl(
+                output_stream,
+                _startup_error(
+                    "DaemonShutdownError",
+                    f"daemon PID {pid} acknowledged shutdown but is still alive; keeping daemon files",
+                ),
+            )
+            return 1
+        _cleanup_daemon_files(target)
+        write_jsonl(output_stream, {"ok": True, "message": f"Daemon PID {pid} shut down gracefully"})
+        return 0
+    if _is_windows() and not force:
+        write_jsonl(
+            output_stream,
+            _startup_error(
+                "DaemonShutdownError",
+                f"daemon PID {pid} did not answer the shutdown protocol; "
+                "refusing to force-kill on Windows (SIGTERM there is TerminateProcess "
+                "and skips the IDA database unload). Rerun with --force to kill anyway",
+            ),
+        )
+        return 1
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as exc:
@@ -179,6 +295,28 @@ def _shutdown_daemon(target: str | None, output_stream: TextIO) -> int:
     _cleanup_daemon_files(target)
     write_jsonl(output_stream, {"ok": True, "message": f"Sent SIGTERM to daemon PID {pid}"})
     return 0
+
+
+def _request_protocol_shutdown(target: str) -> bool:
+    """Ask the daemon to shut itself down via the authenticated control message.
+
+    Returns True only on an explicit {"ok": true, "shutdown": true}
+    acknowledgement; every transport or protocol failure returns False so
+    the caller can pick the platform fallback.
+    """
+    from .daemon import DaemonClient  # noqa: PLC0415
+
+    client = DaemonClient(target)
+    try:
+        client.connect()
+        client.set_read_timeout(_SHUTDOWN_TIMEOUT)
+        client.write('{"shutdown": true}\n')
+        payload = json.loads(client.readline())
+    except Exception:
+        return False  # connection, timeout, EOF, or garbage — no ack received
+    finally:
+        client.close()
+    return isinstance(payload, dict) and payload.get("ok") is True and payload.get("shutdown") is True
 
 
 def _wait_for_process_exit(pid: int) -> bool:
@@ -216,7 +354,7 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     try:
-        os.waitpid(pid, os.WNOHANG)  # reap our own child so zombies count as dead
+        os.waitpid(pid, getattr(os, "WNOHANG", 0))  # reap our own child so zombies count as dead
     except (AttributeError, ChildProcessError, OSError):
         return True  # not our child; the existence probe above already succeeded
     try:
@@ -226,13 +364,26 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _tolerate_undecodable_stdin(stream: TextIO) -> None:
-    """Replace undecodable stdin bytes so one bad byte cannot kill the loop."""
+def _pin_request_stdin_codec(stream: TextIO) -> None:
+    """Decode requests as UTF-8, replacing bytes that are not.
+
+    The wire is UTF-8 in every direction: encode_jsonl emits it, the agent
+    bridge writes it, the daemon transport pins it on both makefiles, and
+    the protocol stdout below opens it. Only this stdio path was left to the
+    host locale, so on a non-UTF-8 codepage (cp936, cp1252, ...) requests
+    decoded into *different, valid* characters and the kernel answered
+    ok=true with silently rewritten text -- a comment or rename would land
+    in the database as mojibake, and mutations.py's read-back check compares
+    against the already-corrupted value, so it passes.
+
+    errors="replace" is kept so one undecodable byte still cannot kill the
+    serve loop.
+    """
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is None:
         return  # StringIO and similar test doubles cannot be reconfigured
     try:
-        reconfigure(errors="replace")
+        reconfigure(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         pass
 
@@ -257,8 +408,20 @@ def _guarded_protocol_stdout() -> TextIO:
     return os.fdopen(protocol_fd, "w", encoding="utf-8", errors="replace", newline="\n")
 
 
-def _serve(runtime: object, stdin: TextIO, stdout: TextIO) -> int:
-    """Process JSONL requests until EOF; malformed or oversized lines get envelopes."""
+def _serve(
+    runtime: _RequestExecutor,
+    stdin: TextIO,
+    stdout: TextIO,
+    *,
+    control_handler: Any | None = None,
+) -> int:
+    """Process JSONL requests until EOF; malformed or oversized lines get envelopes.
+
+    control_handler (daemon mode only) inspects each well-sized line before
+    request parsing; returning True means the line was a control message —
+    the handler owns its response — and ends the serve loop. Stdio mode
+    passes no handler, so control messages stay ordinary format errors.
+    """
 
     while True:
         line, oversized = _read_request_line(stdin, _MAX_REQUEST_LINE_CHARS)
@@ -278,6 +441,8 @@ def _serve(runtime: object, stdin: TextIO, stdout: TextIO) -> int:
             continue
         if line.strip() == "":
             continue
+        if control_handler is not None and control_handler(line, stdout):
+            break
         try:
             request = parse_request(line)
         except BadJsonError as exc:

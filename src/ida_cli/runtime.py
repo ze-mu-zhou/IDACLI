@@ -20,6 +20,19 @@ REQUEST_FILENAME = "<ida-cli-request>"
 _CAPTURE_LOCAL = threading.local()
 _MAIN_THREAD = threading.main_thread()
 _STREAM_PROXIES_INSTALLED = False
+# Set by the process-signal handler (SIGTERM/SIGINT) when it injects a
+# KeyboardInterrupt: execute() then lets that KI escape instead of wrapping
+# it into an error envelope, so the daemon/stdio loop actually shuts down.
+_SIGNAL_INTERRUPT = threading.Event()
+
+# Hoisted isinstance targets. `bool | str | int` written inline is a runtime
+# expression: CPython rebuilds a types.UnionType on every evaluation, so the
+# hot JSON walker below would allocate one per node. Module-level tuples are
+# constant and free to reuse. Keep these in sync with _prepare_json_value.
+_JSON_SCALARS = (bool, str, int)
+_BYTESLIKE = (bytes, bytearray, memoryview)
+_CONTAINERS = (list, tuple, set, frozenset, dict)
+_SETS = (set, frozenset)
 
 
 class _ThreadRoutedStream:
@@ -68,10 +81,14 @@ def _install_stream_proxies() -> None:
     global _STREAM_PROXIES_INSTALLED
     if _STREAM_PROXIES_INSTALLED:
         return
-    real_stderr = sys.stderr if sys.stderr is not None else sys.__stderr__
-    real_stdout = sys.stdout if sys.stdout is not None else real_stderr
-    sys.stdout = _ThreadRoutedStream("stdout_buffer", real_stdout, real_stderr)  # type: ignore[assignment]
-    sys.stderr = _ThreadRoutedStream("stderr_buffer", real_stderr, real_stderr)  # type: ignore[assignment]
+    # Both may be None under pythonw or a fully detached process; io.StringIO
+    # keeps the proxies total rather than making every write conditional.
+    real_stderr: TextIO = sys.stderr or sys.__stderr__ or io.StringIO()
+    real_stdout: TextIO = sys.stdout or real_stderr
+    # _ThreadRoutedStream is a duck-typed proxy, not a TextIOBase subclass;
+    # sys.stdout/stderr accept it at runtime and every caller only writes.
+    sys.stdout = _ThreadRoutedStream("stdout_buffer", real_stdout, real_stderr)
+    sys.stderr = _ThreadRoutedStream("stderr_buffer", real_stderr, real_stderr)
     _STREAM_PROXIES_INSTALLED = True
 
 
@@ -147,9 +164,28 @@ class PythonRuntime:
             with _capture_request_streams(stdout, stderr):
                 with _RequestBindings(self.globals, request_bindings):
                     exec(compiled, self.globals, self.globals)
-        except (Exception, SystemExit, KeyboardInterrupt) as exc:
-            # SystemExit/KeyboardInterrupt raised by executed code must become
-            # error envelopes; letting them escape would kill the kernel process.
+        except KeyboardInterrupt as exc:
+            # Two sources: executed code raising KI itself becomes an error
+            # envelope (letting it escape would kill the kernel), while a KI
+            # injected by the process-signal handler (_SIGNAL_INTERRUPT set)
+            # must escape so the serve loop shuts down — swallowing it would
+            # ignore SIGTERM. A code-raised KI that lands in the same instant
+            # as a signal is misread as signal-delivered; that race is
+            # accepted because the process is being asked to die anyway.
+            if _SIGNAL_INTERRUPT.is_set():
+                raise
+            elapsed_ms = _elapsed_ms(start_ns)
+            return self._error_response(
+                request_id,
+                include_id,
+                exc,
+                stdout.getvalue(),
+                stderr.getvalue(),
+                elapsed_ms,
+            )
+        except (Exception, SystemExit) as exc:
+            # SystemExit raised by executed code must become an error
+            # envelope; letting it escape would kill the kernel process.
             elapsed_ms = _elapsed_ms(start_ns)
             return self._error_response(
                 request_id,
@@ -195,8 +231,10 @@ class PythonRuntime:
                 bindings=getattr(request, "bindings", {}),
             )
         request_id = request.get("id")
+        # execute() validates non-str code into an error envelope, so a missing
+        # or non-string field stays a protocol answer rather than a crash.
         return self.execute(
-            request.get("code"),
+            request.get("code"),  # type: ignore[arg-type]
             request_id=request_id,
             has_request_id="id" in request,
             bindings=request.get("bindings"),
@@ -270,25 +308,25 @@ def exception_data(exc: BaseException) -> dict[str, Any]:
 
 def _prepare_json_value(value: Any, active: set[int]) -> Any:
     """Prepare one value recursively; when modifying, avoid lossy untagged coercion."""
-    if value is None or isinstance(value, bool | str | int):
+    if value is None or isinstance(value, _JSON_SCALARS):
         return value
     if isinstance(value, float):
         if math.isfinite(value):
             return value
         return {"__type__": "float", "value": repr(value)}
-    if isinstance(value, bytes | bytearray | memoryview):
+    if isinstance(value, _BYTESLIKE):
         raw = bytes(value)
         return {"__type__": "bytes", "length": len(raw), "encoding": "hex", "data": raw.hex()}
 
     value_id = id(value)
-    if isinstance(value, list | tuple | set | frozenset | dict):
+    if isinstance(value, _CONTAINERS):
         if value_id in active:
             return {"__type__": "cycle", "python_type": _python_type(value)}
         active.add(value_id)
         try:
             if isinstance(value, dict):
                 return _prepare_dict(value, active)
-            if isinstance(value, set | frozenset):
+            if isinstance(value, _SETS):
                 return _prepare_set(value, active)
             return [_prepare_json_value(item, active) for item in value]
         finally:
@@ -299,15 +337,22 @@ def _prepare_json_value(value: Any, active: set[int]) -> Any:
 
 def _prepare_dict(value: Mapping[Any, Any], active: set[int]) -> Any:
     """Prepare mappings; when keys are not strings, preserve key values explicitly."""
-    if all(isinstance(key, str) for key in value):
-        return {key: _prepare_json_value(item, active) for key, item in value.items()}
-    return {
-        "__type__": "dict",
-        "items": [
-            [_prepare_json_value(key, active), _prepare_json_value(item, active)]
-            for key, item in value.items()
-        ],
-    }
+    # Single pass: walk values while validating keys, and bail to the tagged
+    # form on the first non-str key. Re-walking the already-prepared prefix in
+    # that branch is safe because _prepare_json_value balances `active`, and it
+    # is the rare path; the common all-str-key case now touches each item once.
+    prepared: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            return {
+                "__type__": "dict",
+                "items": [
+                    [_prepare_json_value(other_key, active), _prepare_json_value(other_item, active)]
+                    for other_key, other_item in value.items()
+                ],
+            }
+        prepared[key] = _prepare_json_value(item, active)
+    return prepared
 
 
 def _prepare_set(value: set[Any] | frozenset[Any], active: set[int]) -> dict[str, Any]:

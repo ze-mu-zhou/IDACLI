@@ -16,7 +16,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-def _run_cli(payload: bytes, *, child_setup: str = "") -> subprocess.CompletedProcess[bytes]:
+def _run_cli(
+    payload: bytes,
+    *,
+    child_setup: str = "",
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
     """Run the real CLI in a child process with a byte-level stdin pipe."""
     child = (
         "import sys\n"
@@ -28,6 +33,8 @@ def _run_cli(payload: bytes, *, child_setup: str = "") -> subprocess.CompletedPr
     )
     env = dict(os.environ)
     env["PYTHONPATH"] = str(SRC) + os.pathsep + env.get("PYTHONPATH", "")
+    if env_overrides:
+        env.update(env_overrides)
     with tempfile.TemporaryDirectory() as temp_dir:
         return subprocess.run(
             [sys.executable, "-B", "-c", child],
@@ -49,8 +56,10 @@ class CliSubprocessTests(unittest.TestCase):
             b'{"id":2,"code":"__result__=2"}\n'
         )
 
-        # Strict UTF-8 stdin: without lenient decoding the loop dies here.
-        completed = _run_cli(payload, child_setup="sys.stdin.reconfigure(encoding='utf-8')\n")
+        # No child_setup: the kernel must pin UTF-8 itself. Forcing the codec
+        # here would hide whether it does -- that shim is what let a locale
+        # mismatch corrupt every non-ASCII request past 258 green tests.
+        completed = _run_cli(payload)
 
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
         self.assertNotIn(b"Traceback", completed.stderr)
@@ -113,6 +122,30 @@ class CliSubprocessTests(unittest.TestCase):
         self.assertEqual([envelope["id"] for envelope in envelopes], ["spawn", "join"])
         self.assertNotIn("stray", stdout_text)
         self.assertIn("stray", completed.stderr.decode("utf-8", "replace"))
+
+    def test_non_ascii_request_survives_a_non_utf8_host_locale(self) -> None:
+        """Requests are UTF-8 on the wire regardless of the host codepage.
+
+        Everything else already pins UTF-8 (encode_jsonl, the agent bridge,
+        both daemon makefiles, the protocol stdout); leaving stdio to the
+        locale silently re-decoded non-ASCII into *different valid*
+        characters and still answered ok=true, so a comment or rename landed
+        in the database as mojibake.
+        """
+        text = "安全 café реверс"
+        payload = (json.dumps({"id": 1, "code": f"__result__ = {text!r}"}, ensure_ascii=False) + "\n").encode(
+            "utf-8"
+        )
+
+        for codepage in ("cp936", "cp1252", "utf-8"):
+            with self.subTest(codepage=codepage):
+                completed = _run_cli(payload, env_overrides={"PYTHONIOENCODING": codepage})
+
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
+                envelope = json.loads(completed.stdout.decode("utf-8").splitlines()[-1])
+                self.assertTrue(envelope["ok"], envelope)
+                # Compare codepoints: a mismatch here is silent data corruption.
+                self.assertEqual(envelope["result"], text)
 
 
 if __name__ == "__main__":

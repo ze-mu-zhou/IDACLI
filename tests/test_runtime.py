@@ -126,6 +126,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(follow_up["ok"])
         self.assertEqual(follow_up["result"], "alive")
 
+    def test_signal_flag_lets_keyboard_interrupt_escape(self) -> None:
+        """A signal-delivered KeyboardInterrupt must reach the serve loop, not an envelope."""
+        import ida_cli.runtime as runtime_mod
+
+        runtime = PythonRuntime()
+        runtime_mod._SIGNAL_INTERRUPT.set()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                runtime.execute("raise KeyboardInterrupt")
+        finally:
+            runtime_mod._SIGNAL_INTERRUPT.clear()
+
     def test_thread_output_is_not_captured_into_the_request_envelope(self) -> None:
         """Threads spawned by executed code must not write into capture buffers."""
         runtime = PythonRuntime()
