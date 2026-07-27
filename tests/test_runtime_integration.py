@@ -16,10 +16,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ida_cli.artifacts import ArtifactStore  # noqa: E402
-from ida_cli.runtime import PythonRuntime  # noqa: E402
-from ida_cli.supervisor import SHARD_STABLE_HASH, make_fanout_plan  # noqa: E402
-from ida_cli.worker_pool import LocalWorkerPool  # noqa: E402
+from ida_cli.artifacts import ArtifactStore
+from ida_cli.runtime import PythonRuntime
+from ida_cli.supervisor import SHARD_STABLE_HASH, make_fanout_plan
+from ida_cli.worker_pool import LocalWorkerPool
 
 
 class RecordingMutationHelper:

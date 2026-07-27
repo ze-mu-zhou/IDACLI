@@ -195,7 +195,7 @@ class ArtifactStoreTests(unittest.TestCase):
 
             self.assertEqual((target / "notes.txt").read_text(encoding="utf-8"), "hello\nworld")
             self.assertEqual(metadata["artifact"], "notes.txt")
-            self.assertEqual(metadata["size"], len("hello\nworld".encode("utf-8")))
+            self.assertEqual(metadata["size"], len(b"hello\nworld"))
 
     def test_escape_through_a_symlinked_container_is_refused_and_creates_nothing(self) -> None:
         """Containment must be decided before any directory is created.

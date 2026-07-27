@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import IO, Any
+from typing import IO, Any, Self
 
 from .protocol import encode_jsonl
 from .supervisor import FanoutPlan, WorkShard
@@ -181,7 +181,7 @@ class JsonlWorkerProcess:
     def launch_plan(self) -> WorkerLaunchPlan:
         return self._launch_plan
 
-    def start(self) -> "JsonlWorkerProcess":
+    def start(self) -> Self:
         if self._process is not None:
             raise RuntimeError("worker process is already started")
         env = os.environ.copy()
@@ -249,7 +249,7 @@ class JsonlWorkerProcess:
         _join_thread(self._stdout_thread)
         _join_thread(self._stderr_thread)
 
-    def __enter__(self) -> "JsonlWorkerProcess":
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -882,12 +882,12 @@ def _elapsed_ms_since(start_ns: int) -> int:
 
 
 __all__ = (
+    "SNAPSHOT_COPY",
+    "WORKER_TIMEOUT_RETURN_CODE",
     "DatabaseSnapshotManifest",
     "DatabaseSnapshotPlan",
     "JsonlWorkerProcess",
     "LocalParallelRunner",
-    "SNAPSHOT_COPY",
-    "WORKER_TIMEOUT_RETURN_CODE",
     "WorkerLaunchPlan",
     "WorkerProtocolError",
     "WorkerTimeoutError",

@@ -6,9 +6,10 @@ import hashlib
 import json
 import os
 import secrets
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterable
+from typing import Any
 
 _ARTIFACT_DIR = "artifacts"
 _TMP_SUFFIX = ".tmp"
@@ -35,7 +36,7 @@ class ArtifactStore:
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def create(cls, runs_dir: str | os.PathLike[str], run_id: str | None = None) -> "ArtifactStore":
+    def create(cls, runs_dir: str | os.PathLike[str], run_id: str | None = None) -> ArtifactStore:
         """Create a per-run artifact store under ``runs_dir``.
 
         The metadata prefix is deliberately run-relative (``artifacts/...``),
@@ -49,7 +50,7 @@ class ArtifactStore:
         return cls(Path(runs_dir) / safe_run_id)
 
     @classmethod
-    def in_directory(cls, artifact_dir: str | os.PathLike[str]) -> "ArtifactStore":
+    def in_directory(cls, artifact_dir: str | os.PathLike[str]) -> ArtifactStore:
         """Create a store that writes directly into one existing artifact directory.
 
         The store root IS the artifact directory here, so ``artifact`` paths
@@ -165,7 +166,7 @@ class ArtifactStore:
 def _new_run_id() -> str:
     """Create a sortable, path-safe run identifier."""
     # Use UTC plus entropy; future changes must avoid clock-only collisions.
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{secrets.token_hex(4)}"
 
 

@@ -268,9 +268,9 @@ def make_fanout_plan(
 
 
 __all__ = (
-    "FanoutPlan",
     "SHARD_CONTIGUOUS",
     "SHARD_STABLE_HASH",
+    "FanoutPlan",
     "WorkShard",
     "make_fanout_plan",
     "make_work_shards",

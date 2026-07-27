@@ -304,7 +304,7 @@ def _request_protocol_shutdown(target: str) -> bool:
     acknowledgement; every transport or protocol failure returns False so
     the caller can pick the platform fallback.
     """
-    from .daemon import DaemonClient  # noqa: PLC0415
+    from .daemon import DaemonClient
 
     client = DaemonClient(target)
     try:

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Optional, TextIO, Tuple
+from typing import Any, TextIO
 
-JsonObject = Dict[str, Any]
+JsonObject = dict[str, Any]
 
 __all__ = (
     "BadJsonError",
@@ -111,7 +112,7 @@ def success_response(
 
 
 def error_response(
-    request: Optional[ProtocolRequest],
+    request: ProtocolRequest | None,
     *,
     error_type: str,
     message: str,
@@ -169,7 +170,7 @@ def write_jsonl(stream: TextIO, message: JsonObject) -> None:
 
 
 def _base_response(
-    request: Optional[ProtocolRequest],
+    request: ProtocolRequest | None,
     *,
     stdout: str,
     stderr: str,
@@ -186,7 +187,7 @@ def _base_response(
     return envelope
 
 
-def _object_without_duplicate_keys(pairs: Iterable[Tuple[str, Any]]) -> JsonObject:
+def _object_without_duplicate_keys(pairs: Iterable[tuple[str, Any]]) -> JsonObject:
     """Decode JSON objects without ambiguity. When modifying this, reject duplicate keys."""
     decoded: JsonObject = {}
     for key, value in pairs:
@@ -204,7 +205,7 @@ def _reject_json_constant(source: str, constant: str) -> None:
     raise BadJsonError(f"invalid JSON constant: {constant}", line, column, safe_position)
 
 
-def _line_column(source: str, position: int) -> Tuple[int, int]:
+def _line_column(source: str, position: int) -> tuple[int, int]:
     """Map a byte-like character offset to line and column. When modifying this, keep it bounded."""
     bounded_position = min(max(position, 0), len(source))
     prefix = source[:bounded_position]

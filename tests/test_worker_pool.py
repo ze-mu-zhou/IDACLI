@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ida_cli.worker_pool import (  # noqa: E402
+from ida_cli.worker_pool import (
     LocalWorkerPool,
     WorkerProcessCrash,
     WorkerSpec,

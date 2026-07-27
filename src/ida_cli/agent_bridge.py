@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import queue
-import socket
 import subprocess
 import sys
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from os import PathLike
-from typing import IO, Any
+from typing import IO, Any, Self
 
 from .daemon import DaemonClient, is_daemon_running
 from .protocol import encode_jsonl
@@ -73,7 +72,7 @@ class AgentSession:
         probe_backend: bool = False,
         require_ida: bool = False,
         daemon: bool = False,
-    ) -> "AgentSession":
+    ) -> AgentSession:
         """Launch one kernel and append the target path as the only runtime argument.
 
         In WSL, auto-detects Windows Python with idapro and converts WSL paths
@@ -119,7 +118,7 @@ class AgentSession:
         return session
 
     @classmethod
-    def connect(cls, target_path: str | PathLike[str], *, request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS) -> "AgentSession":
+    def connect(cls, target_path: str | PathLike[str], *, request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS) -> AgentSession:
         """Connect to an existing daemon without spawning a new kernel.
 
         DaemonClient answers a missing daemon, a bad banner, a missing token
@@ -139,7 +138,7 @@ class AgentSession:
         return cls(None, None, request_timeout_s=request_timeout_s, daemon_client=client, daemon_target=target)
 
     @classmethod
-    def _start_daemon(cls, target: str, command: Sequence[str] | None, *, request_timeout_s: float, probe_backend: bool, require_ida: bool) -> "AgentSession":
+    def _start_daemon(cls, target: str, command: Sequence[str] | None, *, request_timeout_s: float, probe_backend: bool, require_ida: bool) -> AgentSession:
         """Spawn ida-ai --daemon and connect, or connect to existing daemon."""
         import time as _time
         if is_daemon_running(target):
@@ -244,7 +243,7 @@ class AgentSession:
         if self._stderr_file is not None:
             self._stderr_file.close()
 
-    def __enter__(self) -> "AgentSession":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
@@ -274,7 +273,7 @@ class AgentSession:
             effective = _require_timeout("timeout_s", timeout_s)
             try:
                 line = self._read_daemon_line(effective)
-            except socket.timeout as exc:
+            except TimeoutError as exc:
                 self._poison_daemon(f"a response timed out after {effective:.3f}s")
                 raise AgentBridgeTimeoutError(
                     f"daemon response timed out after {effective:.3f}s; {self._daemon_reconnect_hint()}"

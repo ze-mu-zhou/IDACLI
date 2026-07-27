@@ -637,7 +637,7 @@ class MainThreadExecutorTests(unittest.TestCase):
         def _run_second() -> None:
             try:
                 second["value"] = executor.execute_request("second")
-            except BaseException as exc:  # noqa: BLE001 - the failure mode under test
+            except BaseException as exc:  # The failure mode under test is intentionally unrestricted.
                 second["error"] = exc
 
         waiter = threading.Thread(target=_run_second, daemon=True)
@@ -685,7 +685,7 @@ class MainThreadExecutorTests(unittest.TestCase):
         """Run a request and drop whatever it raises; used to occupy the executor."""
         try:
             executor.execute_request(request)
-        except BaseException:  # noqa: BLE001 - the helper only needs to block
+        except BaseException:  # The helper only needs to keep the executor occupied.
             pass
 
     def test_late_interrupt_during_request_teardown_still_answers_the_waiter(self) -> None:
@@ -785,7 +785,7 @@ class MainThreadExecutorTests(unittest.TestCase):
         def _client() -> None:
             try:
                 executor.execute_request("req")
-            except BaseException as exc:  # noqa: BLE001 - recorded for assertion
+            except BaseException as exc:  # Record any failure for the assertion below.
                 outcome["error"] = exc
 
         client_thread = threading.Thread(target=_client, daemon=True)
@@ -867,7 +867,7 @@ class DaemonDirTests(unittest.TestCase):
     def test_console_output_decodes_utf16_and_utf8(self) -> None:
         decode = daemon_mod._decode_console_output
         self.assertEqual(decode("Debian\n".encode("utf-16-le")).strip(), "Debian")
-        self.assertEqual(decode("Debian\n".encode("utf-8")).strip(), "Debian")
+        self.assertEqual(decode(b"Debian\n").strip(), "Debian")
         self.assertIn("�", decode(b"\xff\xfe invalid \xff"))
 
     def test_wsl_distro_name_handles_utf16_console_output(self) -> None:

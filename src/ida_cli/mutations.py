@@ -601,8 +601,8 @@ def save(path: str | None = None, flags: int = 0) -> dict[str, Any]:
 
 
 __all__ = (
-    "DatabaseMutations",
     "MAX_PATCH_BYTES",
+    "DatabaseMutations",
     "MutationError",
     "apply_type",
     "create_mutations",

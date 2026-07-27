@@ -101,7 +101,7 @@ class DaemonTimings:
         """Return the effective per-request budget in seconds."""
         return _exec_timeout_seconds() if self.exec_timeout is None else self.exec_timeout
 
-    def scaled(self, factor: float) -> "DaemonTimings":
+    def scaled(self, factor: float) -> DaemonTimings:
         """Return the same knobs scaled by factor; handy for slow CI hosts."""
         return replace(
             self,
@@ -770,7 +770,7 @@ class DaemonServer:
                 try:
                     server.settimeout(remaining)
                     conn, _addr = server.accept()
-                except socket.timeout:
+                except TimeoutError:
                     break
                 except OSError as exc:
                     if exc.errno in _ACCEPT_RETRYABLE_ERRNOS:
@@ -814,12 +814,12 @@ class DaemonServer:
             conn.settimeout(self._timings.auth_timeout)
             with conn.makefile(mode="r", encoding="utf-8", errors="replace") as stdin, \
                  conn.makefile(mode="w", encoding="utf-8", errors="replace") as stdout:
-                from .protocol import write_jsonl  # noqa: PLC0415
+                from .protocol import write_jsonl
                 write_jsonl(stdout, _banner_payload())
                 if not self._authorize(stdin, stdout, accepted_at):
                     return
                 conn.settimeout(None)
-                from .__main__ import _serve  # noqa: PLC0415
+                from .__main__ import _serve
                 try:
                     _serve(self._runtime, stdin, stdout, control_handler=self._handle_control_message)
                 except (TimeoutError, RuntimeError) as exc:
@@ -828,7 +828,7 @@ class DaemonServer:
                     # instead of dropping the socket: in daemon mode the client
                     # cannot see our stderr, so a bare EOF is indistinguishable
                     # from a crashed kernel.
-                    from .protocol import error_response  # noqa: PLC0415
+                    from .protocol import error_response
 
                     write_jsonl(
                         stdout,
@@ -872,7 +872,7 @@ class DaemonServer:
             return False
         if payload["shutdown"] is not True:
             return False
-        from .protocol import write_jsonl  # noqa: PLC0415
+        from .protocol import write_jsonl
 
         # Shut down *before* acknowledging: the ack is a promise that
         # teardown has begun, and --shutdown starts its process-exit
@@ -934,7 +934,7 @@ class DaemonServer:
         token = payload.get("auth") if isinstance(payload, dict) else None
         if isinstance(token, str) and hmac.compare_digest(token, self._token):
             return True
-        from .protocol import error_response, write_jsonl  # noqa: PLC0415
+        from .protocol import error_response, write_jsonl
         write_jsonl(
             stdout,
             error_response(
@@ -1092,8 +1092,8 @@ __all__ = (
     "DaemonRunningError",
     "DaemonServer",
     "DaemonTimings",
-    "get_port_path",
     "get_pid_path",
+    "get_port_path",
     "get_token_path",
     "is_daemon_running",
 )

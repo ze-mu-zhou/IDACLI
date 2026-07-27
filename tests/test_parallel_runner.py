@@ -17,7 +17,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ida_cli.parallel_runner import (  # noqa: E402
+from ida_cli.parallel_runner import (
     DatabaseSnapshotPlan,
     JsonlWorkerProcess,
     LocalParallelRunner,
@@ -32,8 +32,8 @@ from ida_cli.parallel_runner import (  # noqa: E402
     worker_response_to_result,
     worker_specs_from_snapshots,
 )
-from ida_cli.supervisor import make_fanout_plan  # noqa: E402
-from ida_cli.worker_pool import WorkerSpec  # noqa: E402
+from ida_cli.supervisor import make_fanout_plan
+from ida_cli.worker_pool import WorkerSpec
 
 
 FAKE_WORKER = textwrap.dedent(

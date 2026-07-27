@@ -11,8 +11,8 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ida_cli import daemon  # noqa: E402
-from ida_cli.wsl import _fallback_win_to_wsl, _fallback_wsl_to_win  # noqa: E402
+from ida_cli import daemon
+from ida_cli.wsl import _fallback_win_to_wsl, _fallback_wsl_to_win
 
 
 class FallbackWslToWinTests(unittest.TestCase):

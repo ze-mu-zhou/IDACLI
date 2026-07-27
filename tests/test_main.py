@@ -15,6 +15,7 @@ import threading
 import tomllib
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -166,7 +167,7 @@ class _CloseTrackingSession:
 class _KeyboardInterruptServer:
     """DaemonServer double raising KeyboardInterrupt while serving."""
 
-    instances: list["_KeyboardInterruptServer"] = []
+    instances: ClassVar[list[_KeyboardInterruptServer]] = []
 
     def __init__(self, target: str, runtime: object) -> None:
         self.handler_seen: object = None

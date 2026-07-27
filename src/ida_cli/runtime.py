@@ -13,7 +13,7 @@ import time
 import traceback
 from collections.abc import Iterable, Iterator, Mapping
 from types import TracebackType
-from typing import Any, TextIO
+from typing import Any, Self, TextIO
 
 REQUEST_FILENAME = "<ida-cli-request>"
 
@@ -271,7 +271,7 @@ class _RequestBindings:
         self._previous: dict[str, Any] = {}
         self._missing: set[str] = set()
 
-    def __enter__(self) -> "_RequestBindings":
+    def __enter__(self) -> Self:
         for name, value in self._bindings.items():
             if name in self._runtime_globals:
                 self._previous[name] = self._runtime_globals[name]

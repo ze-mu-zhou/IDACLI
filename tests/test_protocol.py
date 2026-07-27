@@ -12,7 +12,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from ida_cli.protocol import (  # noqa: E402
+from ida_cli.protocol import (
     BadJsonError,
     RequestFormatError,
     bad_json_response,

@@ -126,7 +126,7 @@ class WorkerSpec:
         worker_prefix: str = "worker",
         argv: Iterable[str] = (),
         env: Iterable[tuple[str, str]] | Mapping[str, str] = (),
-    ) -> "WorkerSpec":
+    ) -> WorkerSpec:
         worker_index = _require_int("index", index, minimum=0)
         prefix = _require_text("worker_prefix", worker_prefix)
         target = _require_text("target_path", target_path)
@@ -164,7 +164,7 @@ class WorkerError:
     traceback: str
 
     @classmethod
-    def from_exception(cls, worker_id: str, shard_id: str, exc: Exception) -> "WorkerError":
+    def from_exception(cls, worker_id: str, shard_id: str, exc: Exception) -> WorkerError:
         return cls(
             worker_id=worker_id,
             shard_id=shard_id,
@@ -263,7 +263,7 @@ class WorkerResult:
         item_count: int,
         elapsed_ms: int,
         result: Any,
-    ) -> "WorkerResult":
+    ) -> WorkerResult:
         return cls(worker_id, shard_id, True, _RESULT_OK, item_count, elapsed_ms, result=result)
 
     @classmethod
@@ -275,7 +275,7 @@ class WorkerResult:
         item_count: int,
         elapsed_ms: int,
         error: WorkerError,
-    ) -> "WorkerResult":
+    ) -> WorkerResult:
         return cls(worker_id, shard_id, False, _RESULT_ERROR, item_count, elapsed_ms, error=error)
 
     @classmethod
@@ -287,7 +287,7 @@ class WorkerResult:
         item_count: int,
         elapsed_ms: int,
         crash: WorkerCrash,
-    ) -> "WorkerResult":
+    ) -> WorkerResult:
         return cls(worker_id, shard_id, False, _RESULT_CRASH, item_count, elapsed_ms, crash=crash)
 
     def as_dict(self) -> dict[str, Any]:
@@ -329,7 +329,7 @@ class FanoutResult:
         worker_count: int,
         results: Iterable[WorkerResult],
         elapsed_ms: int,
-    ) -> "FanoutResult":
+    ) -> FanoutResult:
         records = tuple(results)
         errors = sum(1 for record in records if record.status == _RESULT_ERROR)
         crashes = sum(1 for record in records if record.status == _RESULT_CRASH)
