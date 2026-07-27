@@ -13,3 +13,7 @@ artifacts/
 logs/
 snapshots/
 AGENTS.md
+
+# Scratch dirs from review/benchmark sessions.
+.tmp_*/
+.tmp_*
