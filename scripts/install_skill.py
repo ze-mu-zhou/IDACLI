@@ -43,6 +43,7 @@ def install(agent: str, *, target_root: str | os.PathLike[str] | None = None, fo
 
 
 def _install_one(agent: str, *, target_root: str | os.PathLike[str] | None, force: bool) -> dict[str, str]:
+    """Install one agent flavor, refusing destinations that collide with the source."""
     if agent not in _AGENTS:
         raise InstallError(f"unsupported agent: {agent}")
     source = _repo_root() / "skills" / agent / _SKILL_NAME
@@ -50,6 +51,12 @@ def _install_one(agent: str, *, target_root: str | os.PathLike[str] | None, forc
         raise InstallError(f"missing source skill: {source}")
     root = Path(target_root) if target_root is not None else _default_root(agent)
     destination = root / _SKILL_NAME
+    # resolve() folds symlinks and ".." spellings; normcase() folds case so
+    # differing spellings compare equal on case-insensitive filesystems.
+    resolved_source = Path(os.path.normcase(source.resolve()))
+    resolved_destination = Path(os.path.normcase(destination.resolve()))
+    if resolved_destination == resolved_source or resolved_source in resolved_destination.parents:
+        raise InstallError(f"destination conflicts with source skill directory: {destination}")
     if destination.exists():
         if not force:
             raise InstallError(f"destination exists; rerun with --force: {destination}")

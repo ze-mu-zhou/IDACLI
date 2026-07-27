@@ -7,11 +7,14 @@ All failures raise clear exceptions with actionable messages.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 _ENV_PYTHON = "IDA_CLI_PYTHON"
 _WSL_INTEROP = "/proc/sys/fs/binfmt_misc/WSLInterop"
+# A WSL Windows-drive mount is exactly one letter: /mnt/d or /mnt/d/...
+_MNT_DRIVE_RE = re.compile(r"^/mnt/([A-Za-z])($|/)")
 
 
 def is_wsl() -> bool:
@@ -122,12 +125,15 @@ def _fallback_wsl_to_win(wsl_path: str) -> str:
     """Best-effort WSL-to-Win conversion without wslpath.
 
     String-based (not pathlib) so results are identical on any host Python.
+    Only /mnt/<letter>($|/) maps to a drive; longer names ("/mnt/data/...")
+    pass through unchanged instead of fabricating a drive letter that could
+    collide with a real /mnt/<drive>/ spelling.
     """
     normalized = wsl_path.replace("\\", "/")
-    parts = [part for part in normalized.split("/") if part]
-    if normalized.startswith("/mnt/") and len(parts) >= 2:
-        drive = parts[1].upper()
-        tail = "\\".join(parts[2:])
+    match = _MNT_DRIVE_RE.match(normalized)
+    if match:
+        drive = match.group(1).upper()
+        tail = normalized[match.end():].strip("/").replace("/", "\\")
         return f"{drive}:\\{tail}"
     return wsl_path
 

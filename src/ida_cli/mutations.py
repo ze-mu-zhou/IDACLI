@@ -123,8 +123,8 @@ class DatabaseMutations:
 
         ea = self._resolve_ea(ea_or_name)
         payload = self._byte_payload(data)
-        old_bytes = self._read_bytes(ea, len(payload))
-        return self._patch_record(ea, old_bytes, payload, applied=False)
+        old_bytes, read_api = self._read_bytes_with_api(ea, len(payload))
+        return self._patch_record(ea, old_bytes, payload, read_api, applied=False)
 
     def patch_bytes(self, ea_or_name: int | str, data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
         """Patch bytes through IDA and report every changed address.
@@ -136,13 +136,14 @@ class DatabaseMutations:
 
         ea = self._resolve_ea(ea_or_name)
         payload = self._byte_payload(data)
-        old_bytes = self._read_bytes(ea, len(payload))
+        old_bytes, read_api = self._read_bytes_with_api(ea, len(payload))
         patch_byte = self._require_attr("ida_bytes", "patch_byte")
         try:
+            # _read_bytes_with_api already validated [ea, ea + len - 1], so the
+            # write loop does not re-derive BADADDR for every byte.
             for index, (old_value, new_value) in enumerate(zip(old_bytes, payload, strict=True)):
                 if old_value != new_value:
-                    address = self._checked_ea(ea + index)
-                    self._must_succeed(patch_byte(address, new_value), "ida_bytes.patch_byte")
+                    self._must_succeed(patch_byte(ea + index, new_value), "ida_bytes.patch_byte")
             actual_bytes = self._read_bytes(ea, len(payload))
             if actual_bytes != payload:
                 raise MutationError(f"ida_bytes.patch_byte did not apply the exact byte sequence at 0x{ea:x}")
@@ -150,7 +151,7 @@ class DatabaseMutations:
             # Restore original bytes; future changes must keep this best-effort and never mask the root error.
             self._restore_bytes(ea, old_bytes, payload, patch_byte)
             raise
-        return self._patch_record(ea, old_bytes, payload, applied=True)
+        return self._patch_record(ea, old_bytes, payload, read_api, applied=True)
 
     def patch_byte(self, ea_or_name: int | str, value: int) -> dict[str, Any]:
         """Patch one byte while preserving the byte-range record format."""
@@ -233,7 +234,9 @@ class DatabaseMutations:
             metadata={"api": "ida_typeinf.apply_cdecl", "flags": flags},
         )
 
-    def _patch_record(self, ea: int, old_bytes: bytes, new_bytes: bytes, *, applied: bool) -> dict[str, Any]:
+    def _patch_record(
+        self, ea: int, old_bytes: bytes, new_bytes: bytes, read_api: str, *, applied: bool
+    ) -> dict[str, Any]:
         changed_addresses = [
             ea + index
             for index, (old_value, new_value) in enumerate(zip(old_bytes, new_bytes, strict=True))
@@ -246,7 +249,7 @@ class DatabaseMutations:
             before={"bytes": old_bytes.hex()},
             after={"bytes": new_bytes.hex()},
             changed_addresses=changed_addresses,
-            metadata={"api": "ida_bytes.patch_byte", "read_api": "ida_bytes.get_db_byte"},
+            metadata={"api": "ida_bytes.patch_byte", "read_api": read_api},
         )
 
     def _save_record(self, path: str | None, flags: int, *, applied: bool) -> dict[str, Any]:
@@ -328,14 +331,51 @@ class DatabaseMutations:
         return None if value is None or value == "" else str(value)
 
     def _read_bytes(self, ea: int, count: int) -> bytes:
+        return self._read_bytes_with_api(ea, count)[0]
+
+    def _read_bytes_with_api(self, ea: int, count: int) -> tuple[bytes, str]:
+        """Read a byte window, reporting which IDA API produced it.
+
+        Bulk readers turn a MAX_PATCH_BYTES-sized window from 1,048,576 IDA
+        round-trips into one, which is the difference between a patch that
+        returns promptly and one that outlives the agent's request timeout.
+        ``idc.get_bytes`` comes first because its ``use_dbg`` default is
+        False, matching the database-only semantics of ``get_db_byte``;
+        ``ida_bytes.get_bytes`` reads debugger memory when a debugger is
+        attached, which never happens under idalib. A bulk reader that
+        returns None (range not fully present in the database) falls through
+        to the per-byte path so behaviour is unchanged, not merely faster.
+        """
+        if count == 0:
+            return b"", "none"
+        self._checked_range(ea, count)
+        for module_name, api in (("idc", "get_bytes"), ("ida_bytes", "get_bytes")):
+            reader = self._optional_attr(module_name, api)
+            if reader is None:
+                continue
+            value = reader(ea, count)
+            if value is None:
+                break  # gap in the database; the per-byte path reports it precisely
+            payload = bytes(value)
+            if len(payload) != count:
+                raise MutationError(
+                    f"{module_name}.{api} at 0x{ea:x} returned {len(payload)} bytes, expected {count}"
+                )
+            return payload, f"{module_name}.{api}"
+        return self._read_bytes_bytewise(ea, count), "ida_bytes.get_db_byte"
+
+    def _read_bytes_bytewise(self, ea: int, count: int) -> bytes:
+        """Read one byte at a time; the caller has already validated the range."""
+
         get_byte = self._require_attr("ida_bytes", "get_db_byte")
-        values: list[int] = []
+        values = bytearray(count)
         for index in range(count):
-            address = self._checked_ea(ea + index)
-            value = int(get_byte(address))
+            value = int(get_byte(ea + index))
             if value < 0 or value > 0xFF:
-                raise MutationError(f"ida_bytes.get_db_byte returned invalid byte at 0x{address:x}: {value!r}")
-            values.append(value)
+                raise MutationError(
+                    f"ida_bytes.get_db_byte returned invalid byte at 0x{ea + index:x}: {value!r}"
+                )
+            values[index] = value
         return bytes(values)
 
     def _restore_bytes(self, ea: int, old_bytes: bytes, payload: bytes, patch_byte: Any) -> None:
@@ -345,7 +385,7 @@ class DatabaseMutations:
             if old_value == new_value:
                 continue
             try:
-                patch_byte(self._checked_ea(ea + index), old_value)
+                patch_byte(ea + index, old_value)  # range already validated by the read
             except Exception:
                 continue
 
@@ -372,6 +412,20 @@ class DatabaseMutations:
         if ea < 0 or ea == self._badaddr():
             raise MutationError(f"invalid effective address: {ea!r}")
         return int(ea)
+
+    def _checked_range(self, ea: int, count: int) -> int:
+        """Validate a whole ascending byte window with one BADADDR lookup.
+
+        Equivalent to calling _checked_ea on every address in the window --
+        the range is contiguous and ascending, so only the BADADDR sentinel
+        can fail in the middle -- but it resolves ida_idaapi.BADADDR once
+        instead of once per byte.
+        """
+        start = self._checked_ea(ea)
+        badaddr = self._badaddr()
+        if count > 0 and start <= badaddr <= start + count - 1:
+            raise MutationError(f"invalid effective address: {badaddr!r}")
+        return start
 
     def _checked_text(self, value: str, name: str, *, allow_empty: bool) -> str:
         if not isinstance(value, str):
@@ -418,6 +472,14 @@ class DatabaseMutations:
         if not hasattr(module, attr):
             raise MutationError(f"required IDAPython attribute is unavailable: {module_name}.{attr}")
         return getattr(module, attr)
+
+    def _optional_attr(self, module_name: str, attr: str) -> Any | None:
+        """Return one optional IDAPython callable, or None when unavailable."""
+
+        module = self._optional_module(module_name)
+        if module is None:
+            return None
+        return getattr(module, attr, None)
 
     def _require_module(self, name: str) -> Any:
         module = self._optional_module(name)

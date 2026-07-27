@@ -194,6 +194,65 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(fake.bytes[0x2001], 0xCC)
         json.dumps(applied, allow_nan=False, sort_keys=True)
 
+    def test_bulk_reader_replaces_the_per_byte_read(self) -> None:
+        fake = FakeIdaDatabase()
+        modules = fake.modules()
+        calls: dict[str, int] = {"get_bytes": 0, "get_db_byte": 0}
+        per_byte = modules["ida_bytes"].get_db_byte
+
+        def get_bytes(ea: int, size: int) -> bytes:
+            calls["get_bytes"] += 1
+            return bytes(fake.bytes.get(ea + offset, 0) for offset in range(size))
+
+        def counted_db_byte(ea: int) -> int:
+            calls["get_db_byte"] += 1
+            return per_byte(ea)
+
+        modules["ida_bytes"].get_bytes = get_bytes
+        modules["ida_bytes"].get_db_byte = counted_db_byte
+        helper = DatabaseMutations(modules=modules, auto_import=False)
+
+        proposed = helper.propose_patch_bytes(0x2000, b"\x90\x00\xcc")
+
+        self.assertEqual(proposed["before"]["bytes"], "9000cc")
+        self.assertEqual(calls, {"get_bytes": 1, "get_db_byte": 0})
+        self.assertEqual(proposed["metadata"]["read_api"], "ida_bytes.get_bytes")
+
+    def test_bulk_reader_falls_back_when_it_reports_a_gap(self) -> None:
+        fake = FakeIdaDatabase()
+        modules = fake.modules()
+        modules["ida_bytes"].get_bytes = lambda _ea, _size: None
+        helper = DatabaseMutations(modules=modules, auto_import=False)
+
+        proposed = helper.propose_patch_bytes(0x2000, b"\x90\x00\xcc")
+
+        self.assertEqual(proposed["before"]["bytes"], "9000cc")
+        self.assertEqual(proposed["metadata"]["read_api"], "ida_bytes.get_db_byte")
+
+    def test_read_without_bulk_api_still_reports_the_per_byte_reader(self) -> None:
+        helper = helper_for(FakeIdaDatabase())  # fake exposes get_db_byte only
+
+        proposed = helper.propose_patch_bytes(0x2000, b"\x90\x00")
+
+        self.assertEqual(proposed["before"]["bytes"], "9000")
+        self.assertEqual(proposed["metadata"]["read_api"], "ida_bytes.get_db_byte")
+
+    def test_bulk_reader_rejects_a_short_read(self) -> None:
+        fake = FakeIdaDatabase()
+        modules = fake.modules()
+        modules["ida_bytes"].get_bytes = lambda _ea, _size: b"\x90"
+        helper = DatabaseMutations(modules=modules, auto_import=False)
+
+        with self.assertRaisesRegex(MutationError, "returned 1 bytes, expected 3"):
+            helper.propose_patch_bytes(0x2000, b"\x90\x00\xcc")
+
+    def test_read_rejects_a_window_straddling_badaddr(self) -> None:
+        fake = FakeIdaDatabase()
+        helper = helper_for(fake)
+
+        with self.assertRaisesRegex(MutationError, "invalid effective address"):
+            helper.propose_patch_bytes(BADADDR - 1, b"\x00\x00\x00")
+
     def test_patch_byte_uses_same_record_format(self) -> None:
         fake = FakeIdaDatabase()
         helper = helper_for(fake)

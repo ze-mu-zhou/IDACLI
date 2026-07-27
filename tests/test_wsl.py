@@ -39,6 +39,13 @@ class FallbackWslToWinTests(unittest.TestCase):
         self.assertEqual(_fallback_wsl_to_win("relative/target.i64"), "relative/target.i64")
         self.assertEqual(_fallback_wsl_to_win("/mnt"), "/mnt")
 
+    def test_multi_letter_mnt_names_pass_through(self) -> None:
+        # /mnt/data is not /mnt/<drive>: fabricating "D:\ta\..." corrupts the
+        # path and can collide with a real /mnt/d/ta/... spelling.
+        self.assertEqual(_fallback_wsl_to_win("/mnt/data/a"), "/mnt/data/a")
+        self.assertEqual(_fallback_wsl_to_win("/mnt/data/a.i64"), "/mnt/data/a.i64")
+        self.assertEqual(_fallback_wsl_to_win("/mnt/storage/x/a.i64"), "/mnt/storage/x/a.i64")
+
 
 class FallbackWinToWslTests(unittest.TestCase):
     """Cover drive-letter path conversion without wslpath."""
@@ -107,12 +114,34 @@ class NormalizeTargetPathTests(unittest.TestCase):
         self.assertTrue(result.replace("\\", "/").endswith("/home/user/x"))
 
     def test_short_mnt_prefix_resolves_to_absolute(self) -> None:
-        # "/mnt/" and "/mnt/d" are not valid /mnt/<drive>/ WSL paths, so
-        # they resolve like any other local path instead of passing through.
-        for raw in ("/mnt/", "/mnt/d"):
-            result = daemon._normalize_target_path(raw)
-            self.assertTrue(os.path.isabs(result))
-            self.assertTrue(result.replace("\\", "/").endswith(raw.rstrip("/")))
+        # "/mnt/" is not a valid /mnt/<drive> WSL path, so it resolves like
+        # any other local path instead of passing through.
+        result = daemon._normalize_target_path("/mnt/")
+        self.assertTrue(os.path.isabs(result))
+        self.assertTrue(result.replace("\\", "/").endswith("/mnt"))
+
+    def test_single_letter_mnt_root_maps_to_drive_root(self) -> None:
+        self.assertEqual(daemon._normalize_target_path("/mnt/d"), "D:\\")
+        self.assertEqual(daemon._normalize_target_path("/mnt/E"), "E:\\")
+
+    def test_multi_letter_mnt_names_fall_through_to_resolve(self) -> None:
+        # Only ^/mnt/<letter>($|/) is a drive mapping; longer names must not
+        # fabricate drive letters ("/mnt/data/..." is not "D:\ta\...").
+        for raw, fabricated in (
+            ("/mnt/data/a.i64", "D:\\ta\\a.i64"),
+            ("/mnt/storage/x/a.i64", "S:\\orage\\x\\a.i64"),
+        ):
+            with self.subTest(raw=raw):
+                result = daemon._normalize_target_path(raw)
+                self.assertNotEqual(result, fabricated)
+                self.assertTrue(os.path.isabs(result))
+                self.assertTrue(result.replace("\\", "/").endswith(raw))
+
+    def test_exact_mnt_drive_path_maps_to_windows_form(self) -> None:
+        self.assertEqual(
+            daemon._normalize_target_path("/mnt/d/pwn/a.i64"),
+            "D:\\pwn\\a.i64",
+        )
 
     def test_normalizes_spaces(self) -> None:
         self.assertEqual(
