@@ -398,7 +398,7 @@ def _coerce_shard(shard: Any) -> _PoolShard:
         shard_id = getattr(shard, "shard_id")
         worker_id = getattr(shard, "worker_id")
         items = getattr(shard, "items")
-    if isinstance(items, (bytes, str)):
+    if items is None or isinstance(items, (bytes, str)):
         raise TypeError("shard items must be an iterable of JSON-compatible values")
     return _PoolShard(
         shard_id=_require_text("shard_id", shard_id),
@@ -436,7 +436,7 @@ class LocalWorkerPool:
             indexes.add(spec.index)
         self._specs = specs
         self._by_id = {spec.worker_id: spec for spec in specs}
-        self._active = {spec.worker_id: None for spec in specs}
+        self._active: dict[str, str | None] = {spec.worker_id: None for spec in specs}
         self._completed = {spec.worker_id: 0 for spec in specs}
         self._failed = {spec.worker_id: 0 for spec in specs}
 

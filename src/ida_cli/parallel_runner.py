@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, TextIO
+from typing import IO, Any
 
 from .protocol import encode_jsonl
 from .supervisor import FanoutPlan, WorkShard
@@ -288,19 +288,19 @@ class JsonlWorkerProcess:
             raise RuntimeError("worker process is not started")
         return self._process
 
-    def _require_stdin(self) -> TextIO:
+    def _require_stdin(self) -> IO[str]:
         stdin = self._require_process().stdin
         if stdin is None:
             raise RuntimeError("worker stdin is unavailable")
         return stdin
 
-    def _require_stdout(self) -> TextIO:
+    def _require_stdout(self) -> IO[str]:
         stdout = self._require_process().stdout
         if stdout is None:
             raise RuntimeError("worker stdout is unavailable")
         return stdout
 
-    def _require_stderr(self) -> TextIO:
+    def _require_stderr(self) -> IO[str]:
         stderr = self._require_process().stderr
         if stderr is None:
             raise RuntimeError("worker stderr is unavailable")
@@ -701,19 +701,19 @@ def _snapshot_plan_tuple(plans: Iterable[DatabaseSnapshotPlan]) -> tuple[Databas
     return values
 
 
-def _start_stdout_reader(stream: TextIO, output: queue.Queue[str | None]) -> threading.Thread:
+def _start_stdout_reader(stream: IO[str], output: queue.Queue[str | None]) -> threading.Thread:
     thread = threading.Thread(target=_read_stdout_lines, args=(stream, output), daemon=True)
     thread.start()
     return thread
 
 
-def _start_stderr_reader(stream: TextIO, tail: _TextTail) -> threading.Thread:
+def _start_stderr_reader(stream: IO[str], tail: _TextTail) -> threading.Thread:
     thread = threading.Thread(target=_read_stderr_tail, args=(stream, tail), daemon=True)
     thread.start()
     return thread
 
 
-def _read_stdout_lines(stream: TextIO, output: queue.Queue[str | None]) -> None:
+def _read_stdout_lines(stream: IO[str], output: queue.Queue[str | None]) -> None:
     try:
         for line in stream:
             output.put(line)
@@ -721,12 +721,12 @@ def _read_stdout_lines(stream: TextIO, output: queue.Queue[str | None]) -> None:
         output.put(None)
 
 
-def _read_stderr_tail(stream: TextIO, tail: _TextTail) -> None:
+def _read_stderr_tail(stream: IO[str], tail: _TextTail) -> None:
     for chunk in stream:
         tail.append(chunk)
 
 
-def _close_stream(stream: TextIO | None) -> None:
+def _close_stream(stream: IO[str] | None) -> None:
     if stream is None or stream.closed:
         return
     try:
