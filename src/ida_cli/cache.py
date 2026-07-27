@@ -17,7 +17,10 @@ _EXPORT_SCHEMA = "ida-cli-cache-index-v1"
 _EXPORT_VERSION = 1
 _PERSIST_KIND = "ida-cli-cache-persistent-v1"
 _BADADDR = (1 << 64) - 1
-_FINGERPRINT_KEYS = ("root_filename", "input_md5")
+# Every field is optional and compared only when both sides have it, so keys may
+# be appended: snapshots written before a key existed store nothing for it and
+# keep loading. When changing this, obey _check_fingerprint's None-skip rule.
+_FINGERPRINT_KEYS = ("root_filename", "input_md5", "input_size")
 
 
 class CacheError(RuntimeError):
@@ -28,6 +31,7 @@ class IDACache:
     """Build explicit indexes over an injected IDA-shaped helper or provider."""
 
     __slots__ = (
+        "_ambiguous_names",
         "_call_edges",
         "_decompile_cache",
         "_function_starts",
@@ -47,12 +51,13 @@ class IDACache:
         self._provider = provider
         # Start stale; future changes must never auto-refresh on first read.
         self._stale = True
-        self._stale_reason = "cache has not been refreshed"
+        self._stale_reason: str | None = "cache has not been refreshed"
         self._generation = 0
         self._refreshed_at_ns: int | None = None
         self._functions: list[dict[str, Any]] = []
         self._function_starts: list[int] = []
         self._name_to_address: dict[str, int] = {}
+        self._ambiguous_names: dict[str, list[int]] = {}
         self._string_refs: list[dict[str, Any]] = []
         self._import_refs: list[dict[str, Any]] = []
         self._call_edges: list[dict[str, Any]] = []
@@ -94,7 +99,7 @@ class IDACache:
             functions = self._load_functions()
             imports = self._load_imports()
             strings = self._load_strings()
-            name_to_address = self._load_names(functions, imports)
+            name_to_address, ambiguous_names = self._load_names(functions, imports)
             function_starts = [int(item["ea"]) for item in functions]
             string_refs = self._load_string_refs(strings, functions, function_starts)
             import_refs = self._load_import_refs(imports, functions, function_starts)
@@ -108,6 +113,7 @@ class IDACache:
         self._functions = functions
         self._function_starts = function_starts
         self._name_to_address = name_to_address
+        self._ambiguous_names = ambiguous_names
         self._string_refs = string_refs
         self._import_refs = import_refs
         self._call_edges = call_edges
@@ -124,13 +130,29 @@ class IDACache:
         """Return the cached function index."""
 
         self._ensure_fresh()
-        return _clone(self._functions)
+        return _clone_flat_rows(self._functions)
 
     def name_to_address(self) -> dict[str, int]:
-        """Return the cached name-to-address index."""
+        """Return the cached name-to-address index of unambiguous names."""
 
         self._ensure_fresh()
         return dict(self._name_to_address)
+
+    @property
+    def ambiguous_names(self) -> dict[str, list[int]]:
+        """Return names excluded from resolution for mapping to multiple addresses.
+
+        Duplicate names are a normal property of binaries (same-named
+        functions, or a function sharing its name with an import thunk), so
+        they never fail ``refresh``; instead the name is dropped from
+        ``name_to_address`` and recorded here with sorted candidate
+        addresses. Imports register only their ``module!name`` qualified
+        form, but their bare name still marks a same-named function
+        ambiguous rather than silently resolving to the function.
+        """
+
+        self._ensure_fresh()
+        return _clone(self._ambiguous_names)
 
     def get_ea(self, ea_or_name: int | str) -> int:
         """Resolve an integer, hex string, or cached name without provider calls."""
@@ -146,7 +168,7 @@ class IDACache:
         function = self._function_for_ea(ea)
         if function is None:
             raise CacheError(f"no cached function contains 0x{ea:x}")
-        return _clone(function)
+        return function.copy()  # _normalize_function guarantees a flat row
 
     def string_refs(self) -> list[dict[str, Any]]:
         """Return cached string records with incoming xrefs and ref functions."""
@@ -178,14 +200,26 @@ class IDACache:
         function_ea = int(function["ea"])
         cached = self._decompile_cache.get(function_ea)
         if cached is not None:
-            return _clone(cached)
+            return cached.copy()  # _normalize_decompile guarantees a flat row
         decompile = _method(self._provider, "decompile")
         record = _normalize_decompile(decompile(function_ea), function_ea)
         self._decompile_cache[function_ea] = record
-        return _clone(record)
+        return record.copy()  # _normalize_decompile guarantees a flat row
 
     def export(self) -> dict[str, Any]:
         """Return the JSON-compatible artifact payload for the cache snapshot."""
+
+        return self._export_payload(detach=True)
+
+    def _export_payload(self, *, detach: bool) -> dict[str, Any]:
+        """Build the export payload, copying the indexes only when handed out.
+
+        ``detach=False`` is for callers that serialize the payload and drop
+        it (export_artifact, save_persistent): a full defensive copy of every
+        index is pure waste there, and it is the single most expensive step
+        of save_cache on a large database. Public ``export()`` keeps the copy
+        because its result belongs to the caller.
+        """
 
         self._ensure_fresh()
         return {
@@ -195,19 +229,19 @@ class IDACache:
             "refreshed_at_ns": self._refreshed_at_ns,
             "stale": False,
             "counts": self._counts(),
-            "functions": _clone(self._functions),
+            "functions": _clone_flat_rows(self._functions) if detach else self._functions,
             "name_to_address": dict(self._name_to_address),
             "address_to_function": _function_ranges(self._functions),
-            "string_refs": _clone(self._string_refs),
-            "import_refs": _clone(self._import_refs),
-            "call_edges": _clone(self._call_edges),
+            "string_refs": _clone(self._string_refs) if detach else self._string_refs,
+            "import_refs": _clone(self._import_refs) if detach else self._import_refs,
+            "call_edges": _clone(self._call_edges) if detach else self._call_edges,
             "decompile_cache": _sorted_decompile(self._decompile_cache),
         }
 
     def export_artifact(self, writer: Any, name: str = "cache/index.json") -> dict[str, Any]:
         """Write the cache export through an injected artifact writer."""
 
-        payload = self.export()
+        payload = self._export_payload(detach=False)
         if hasattr(writer, "write_json"):
             artifact = writer.write_json(name, payload)
         elif hasattr(writer, "write_artifact"):
@@ -228,7 +262,7 @@ class IDACache:
         payload = {
             "kind": _PERSIST_KIND,
             "fingerprint": _database_fingerprint(self._provider),
-            "payload": self.export(),
+            "payload": self._export_payload(detach=False),  # serialized immediately, never handed out
         }
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
@@ -300,6 +334,8 @@ class IDACache:
         self._functions = functions
         self._function_starts = [int(item["ea"]) for item in functions]
         self._name_to_address = _normalize_name_map(payload.get("name_to_address"))
+        # Persisted snapshots predate ambiguity tracking; ambiguous names are simply absent from the stored map.
+        self._ambiguous_names = {}
         self._string_refs = _json_records(payload.get("string_refs"), "string_refs")
         self._import_refs = _json_records(payload.get("import_refs"), "import_refs")
         self._call_edges = _json_records(payload.get("call_edges"), "call_edges")
@@ -332,20 +368,43 @@ class IDACache:
 
         return [_normalize_string(row) for row in _records(_method(self._provider, "strings")(), "strings")]
 
-    def _load_names(self, functions: list[dict[str, Any]], imports: list[dict[str, Any]]) -> dict[str, int]:
-        """Load deterministic name resolution from functions, names, and imports."""
+    def _load_names(
+        self, functions: list[dict[str, Any]], imports: list[dict[str, Any]]
+    ) -> tuple[dict[str, int], dict[str, list[int]]]:
+        """Load deterministic name resolution from functions, names, and imports.
 
-        index: dict[str, int] = {}
+        Duplicate names are a normal property of binaries, not corrupted
+        data: any name mapping to multiple distinct addresses is excluded
+        from the resolution table and returned in the ambiguous map with
+        sorted candidate addresses. Imports register only their
+        ``module!name`` qualified form; their bare name never resolves but
+        still marks a same-named function ambiguous, so resolving an import
+        by name can never silently return the function's address.
+        """
+
+        candidates: dict[str, set[int]] = {}
         for function in functions:
-            _add_name(index, function.get("name"), int(function["ea"]))
+            _add_name_candidate(candidates, function.get("name"), int(function["ea"]))
         if hasattr(self._provider, "names"):
             for row in _records(_method(self._provider, "names")(), "names"):
                 name, ea = _normalize_name(row)
-                _add_name(index, name, ea)
+                _add_name_candidate(candidates, name, ea)
         for record in imports:
-            _add_name(index, record.get("name"), int(record["ea"]))
-            _add_name(index, _qualified_import_name(record), int(record["ea"]))
-        return dict(sorted(index.items()))
+            _add_name_candidate(candidates, _qualified_import_name(record), int(record["ea"]))
+        index, ambiguous = _resolve_name_candidates(candidates)
+        import_bare: dict[str, set[int]] = {}
+        for record in imports:
+            _add_name_candidate(import_bare, record.get("name"), int(record["ea"]))
+        for name, eas in import_bare.items():
+            addresses = set(eas)
+            existing = index.get(name)
+            if existing is not None:
+                addresses.add(existing)
+            addresses.update(ambiguous.get(name, ()))
+            if len(addresses) > 1:
+                index.pop(name, None)
+                ambiguous[name] = sorted(addresses)
+        return dict(sorted(index.items())), dict(sorted(ambiguous.items()))
 
     def _load_string_refs(
         self, strings: list[dict[str, Any]], functions: list[dict[str, Any]], starts: list[int]
@@ -404,7 +463,7 @@ class IDACache:
         """Return provider xrefs for every instruction in a function."""
 
         if hasattr(self._provider, "function_xrefs_from"):
-            return _method(self._provider, "function_xrefs_from")(_clone(function))
+            return _method(self._provider, "function_xrefs_from")(function.copy())
         if hasattr(self._provider, "function_items") and hasattr(self._provider, "xrefs_from"):
             return _flatten_function_item_xrefs(self._provider, function)
         raise CacheError("call edge cache requires function_xrefs_from or function_items plus xrefs_from")
@@ -429,9 +488,13 @@ class IDACache:
                 # Accept leading-zero decimals; future changes must keep name lookup as the final fallback.
                 value = int(text, 10)
             except ValueError:
-                if text not in self._name_to_address:
-                    raise CacheError(f"name is not present in refreshed cache: {text!r}")
-                return self._checked_ea(self._name_to_address[text])
+                if text in self._name_to_address:
+                    return self._checked_ea(self._name_to_address[text])
+                candidates = self._ambiguous_names.get(text)
+                if candidates is not None:
+                    choices = ", ".join(f"0x{ea:x}" for ea in candidates)
+                    raise CacheError(f"name {text!r} is ambiguous in refreshed cache; candidates: {choices}")
+                raise CacheError(f"name is not present in refreshed cache: {text!r}")
         return self._checked_ea(value)
 
     def _checked_ea(self, ea: int) -> int:
@@ -474,20 +537,47 @@ def load_persistent_cache(provider: Any, path: str | os.PathLike[str], *, force:
 
 
 def _database_fingerprint(provider: Any) -> dict[str, Any]:
-    """Return a best-effort fingerprint of the database behind a provider."""
+    """Return a best-effort fingerprint of the database behind a provider.
+
+    Both legs run through _normalize_fingerprint so the stored and current
+    sides are always the same shape (str or None); _check_fingerprint
+    compares them with ``!=``, so an int on one side and its str form on
+    the other would read as a mismatch.
+
+    The content hash is deliberately not the only discriminator: the input
+    file size costs one netnode read and already separates two same-named
+    binaries when a loader never recorded a hash. The input *path* is not
+    recorded on purpose -- copying or re-analyzing a binary from another
+    directory would then demand ``force=`` for a database that genuinely
+    matches.
+    """
 
     # Prefer provider-reported identity; future changes must stay None-safe without IDA modules.
     hook = getattr(provider, "fingerprint", None)
     if callable(hook):
         return _normalize_fingerprint(hook())
-    return {
-        "root_filename": _optional_ida_value("ida_nalt", "get_root_filename"),
-        "input_md5": _optional_ida_value("idc", "get_input_md5"),
-    }
+    return _normalize_fingerprint(
+        {
+            "root_filename": _optional_ida_value("ida_nalt", "get_root_filename"),
+            # idc.get_input_md5 does not exist in IDA 9; the hashes live in
+            # ida_nalt and return raw bytes. Getting this name wrong is silent
+            # (the field just stays None), which is exactly how the md5 leg of
+            # this fingerprint stayed dead and let a snapshot from another
+            # binary of the same base name load.
+            "input_md5": _optional_ida_hex("ida_nalt", "retrieve_input_file_md5"),
+            "input_size": _optional_ida_positive_int("ida_nalt", "retrieve_input_file_size"),
+        }
+    )
 
 
-def _optional_ida_value(module_name: str, attr: str) -> str | None:
-    """Return one IDA module string attribute, or None when unavailable."""
+def _ida_call(module_name: str, attr: str) -> Any:
+    """Call one zero-argument IDA getter, returning None when unavailable.
+
+    Import failure, a renamed or missing attribute, and a raising getter are
+    all "this session cannot compute the field". Callers must keep that
+    None-safe: a field the current session cannot produce is skipped by
+    _check_fingerprint, never treated as a mismatch.
+    """
 
     try:
         module = importlib.import_module(module_name)
@@ -497,18 +587,65 @@ def _optional_ida_value(module_name: str, attr: str) -> str | None:
     if not callable(getter):
         return None
     try:
-        value = getter()
+        return getter()
     except Exception:
         return None
+
+
+def _optional_ida_value(module_name: str, attr: str) -> str | None:
+    """Return one IDA module scalar attribute as text, or None when unavailable."""
+
+    value = _ida_call(module_name, attr)
     return None if value is None else str(value)
 
 
+def _optional_ida_hex(module_name: str, attr: str) -> str | None:
+    """Return one IDA module hash attribute as lowercase hex, or None.
+
+    A bytes-aware sibling of _optional_ida_value rather than a change to it:
+    the hash getters return raw bytes, and str() on those yields a Python
+    repr (``b'\\xab...'``) that would be persisted verbatim. Empty bytes mean
+    the database never recorded the hash, which is "unavailable" rather than
+    "the empty hash".
+    """
+
+    value = _ida_call(module_name, attr)
+    if isinstance(value, (bytes, bytearray)):
+        return value.hex() if value else None
+    if isinstance(value, str):
+        # Tolerate a build that already hands back hex text; anything else has
+        # no defined fingerprint form and is dropped instead of guessed at.
+        return value.strip().lower() or None
+    return None
+
+
+def _optional_ida_positive_int(module_name: str, attr: str) -> str | None:
+    """Return one positive IDA integer attribute as text, or None.
+
+    Zero and negatives are IDA's "not recorded" answers -- with no database
+    loaded, IDA 9's retrieve_input_file_size() returns 0 -- and a sentinel
+    must read as unavailable, not as a real value: a snapshot that stored a
+    0 size would otherwise be refused by every session able to measure the
+    real one, which is exactly the refusal this fingerprint must not make.
+    """
+
+    value = _ida_call(module_name, attr)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return str(value)
+
+
 def _normalize_fingerprint(value: Any) -> dict[str, Any]:
-    """Return a JSON-safe fingerprint dict with optional string fields."""
+    """Return a JSON-safe fingerprint dict with optional string fields.
+
+    Empty text collapses to None on both the stored and the current side, so
+    a field IDA answered with "" is skipped as unavailable rather than
+    compared against a session that knows the real value.
+    """
 
     if not isinstance(value, Mapping):
         raise CacheError("persistent cache fingerprint must be an object")
-    return {key: None if value.get(key) is None else str(value.get(key)) for key in _FINGERPRINT_KEYS}
+    return {key: _optional_str(value.get(key)) for key in _FINGERPRINT_KEYS}
 
 
 def _records(value: Any, label: str) -> list[Any]:
@@ -662,7 +799,7 @@ def _flatten_function_item_xrefs(provider: Any, function: dict[str, Any]) -> lis
 
     xrefs_from = _method(provider, "xrefs_from")
     refs: list[Any] = []
-    for item_ea in _records(_method(provider, "function_items")(_clone(function)), "function_items"):
+    for item_ea in _records(_method(provider, "function_items")(function.copy()), "function_items"):
         ea = _int_field({"ea": item_ea}, "ea", "function_item")
         if ea is None:
             raise CacheError("function item address is required")
@@ -729,16 +866,26 @@ def _function_ranges(functions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _add_name(index: dict[str, int], name: Any, ea: int) -> None:
-    """Insert one name and fail on ambiguous addresses."""
+def _add_name_candidate(candidates: dict[str, set[int]], name: Any, ea: int) -> None:
+    """Record one candidate address for a name, ignoring empty names."""
 
     text = _optional_str(name)
     if text is None:
         return
-    existing = index.get(text)
-    if existing is not None and existing != ea:
-        raise CacheError(f"duplicate name {text!r} maps to both 0x{existing:x} and 0x{ea:x}")
-    index[text] = ea
+    candidates.setdefault(text, set()).add(ea)
+
+
+def _resolve_name_candidates(candidates: dict[str, set[int]]) -> tuple[dict[str, int], dict[str, list[int]]]:
+    """Split name candidates into unambiguous resolutions and sorted ambiguous lists."""
+
+    index: dict[str, int] = {}
+    ambiguous: dict[str, list[int]] = {}
+    for name, eas in candidates.items():
+        if len(eas) == 1:
+            index[name] = next(iter(eas))
+        else:
+            ambiguous[name] = sorted(eas)
+    return index, ambiguous
 
 
 def _qualified_import_name(record: dict[str, Any]) -> str | None:
@@ -763,13 +910,52 @@ def _optional_str(value: Any) -> str | None:
 def _sorted_decompile(cache: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     """Return deterministic lazy decompile cache rows."""
 
-    return [_clone(cache[key]) for key in sorted(cache)]
+    return [cache[key].copy() for key in sorted(cache)]
 
 
 def _clone(value: Any) -> Any:
-    """Return a defensive copy so callers cannot mutate cache internals."""
+    """Return a defensive copy so callers cannot mutate cache internals.
 
+    Everything reaching this walker is already JSON-shaped -- dicts with
+    string keys, lists, and immutable scalars -- because every entry point
+    runs through the _normalize_* helpers or JSON decoding. That lets it
+    beat copy.deepcopy by ~3x: no memo table, no __reduce_ex__ dispatch,
+    C-level dict.copy for the container itself, and no recursion at all
+    into the scalar leaves that dominate these records.
+    """
+
+    kind = type(value)
+    if kind is dict:
+        copied = value.copy()
+        for key, item in copied.items():
+            item_kind = type(item)
+            if item_kind is dict or item_kind is list:
+                copied[key] = _clone(item)
+        return copied
+    if kind is list:
+        return [_clone(item) for item in value]
+    if kind in _IMMUTABLE_LEAF_TYPES:
+        return value
+    # Anything else (tuple, set, a dict subclass, an IDA object that slipped
+    # through) is not part of the JSON contract; fall back rather than hand
+    # out a shared reference.
     return copy.deepcopy(value)
+
+
+_IMMUTABLE_LEAF_TYPES = frozenset({str, int, float, bool, type(None)})
+
+
+def _clone_flat_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy rows that _normalize_* guarantees are flat dicts of scalars.
+
+    Only for indexes whose every write path is normalized (functions and
+    decompile records, on both refresh and persistent load). A shallow
+    per-row copy is then a complete defensive copy, and skipping the value
+    scan is another ~3x on top of _clone. Indexes hydrated by _json_records
+    keep the generic walker because a hand-written snapshot may nest.
+    """
+
+    return [row.copy() for row in rows]
 
 
 def _persistent_path(path: str | os.PathLike[str]) -> Path:
