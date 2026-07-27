@@ -43,6 +43,9 @@ testpaths = ["tests"]
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests and benches must run from a bare checkout with no install step, so each
 # module inserts src/ on sys.path before importing ida_cli. Those imports cannot

@@ -74,7 +74,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install ruff mypy
+      - run: python -m pip install ruff==0.16.0 mypy
       - run: python -m ruff check src tests scripts benches examples
       # Config lives in pyproject; both are clean today, so any new finding is
       # a regression rather than pre-existing debt to argue about.
