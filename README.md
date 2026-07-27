@@ -13,9 +13,9 @@
 
 > [!IMPORTANT]
 > 本项目专为 AI Agent 设计。强烈建议让你的 Agent（Kimi Code / Codex）自行完成安装和配置，而非手动操作。
-> 👉 [AI 安装指南](docs/AI_INSTALL.md)
+> 👉 [AI 安装指南](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md)
 
-**[English](README_EN.md)**
+**[English](https://github.com/ze-mu-zhou/IDACLI/blob/main/README_EN.md)**
 
 </div>
 
@@ -225,7 +225,7 @@ src/ida_cli/
 
 | 文档 | 说明 |
 |---|---|
-| [AI 安装指南](docs/AI_INSTALL.md) | 面向 AI Agent 的安装流程 |
+| [AI 安装指南](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md) | 面向 AI Agent 的安装流程 |
 
 ## License
 

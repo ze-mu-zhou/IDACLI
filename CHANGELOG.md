@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--help` / `--version` CLI front door; `ida_cli.__version__` (kept in sync with `pyproject.toml` by test).
 - GitHub Actions CI: unittest matrix on ubuntu-latest / windows-latest, Python 3.11 / 3.12.
 - MIT `LICENSE` file and packaging metadata (license, authors, urls, classifiers).
-- `MANIFEST.in` so sdists ship the complete test suite.
+- `MANIFEST.in` so sdists are self-contained: the test suite plus the `skills/`, `scripts/`, `docs/`, `benches/`, and `examples/` trees the tests and README links depend on.
 - Daemon: protocol banner handshake for liveness probes, per-request socket timeouts, token/PID/port files written `O_EXCL` + `0600`, graceful SIGTERM shutdown, and `_MainThreadExecutor` so IDA API calls run on the thread that owns the database.
 - Persistent-cache database fingerprinting (refuses foreign-DB cache without `force=`).
 - Review backlog with self-install findings: `docs/REVIEW_BACKLOG.md`.

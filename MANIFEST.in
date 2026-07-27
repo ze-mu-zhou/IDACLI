@@ -1,2 +1,24 @@
-# Keep sdists self-contained enough to run the test suite from a tarball.
+# Ship a self-contained sdist: the test suite plus every tree the tests and
+# docs reference (skills/, scripts/install_skill.py, docs/, benches/, examples/).
+# Without these a freshly unpacked sdist fails its own documented test command
+# with FileNotFoundError, and `pip install` leaves no install_skill.py to run.
+#
+# This does NOT fix link rendering on PyPI -- a long_description resolves
+# relative links against the project page, not the sdist -- so the README doc
+# links are absolute GitHub URLs instead. When adding a doc link, keep it
+# absolute.
 recursive-include tests *.py
+recursive-include skills *
+recursive-include docs *
+recursive-include scripts *
+recursive-include benches *
+recursive-include examples *
+
+include LICENSE
+include CHANGELOG.md
+include README.md
+
+# Never ship compiled caches or editor cruft.
+global-exclude *.py[cod]
+global-exclude __pycache__/*
+prune **/__pycache__

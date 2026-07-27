@@ -13,9 +13,9 @@ Give your AI agent unrestricted, persistent, low-latency access to a real IDA da
 
 > [!IMPORTANT]
 > This project is built for AI agents. We strongly recommend letting your agent (Kimi Code / Codex) handle the installation and setup instead of doing it manually.
-> 👉 [AI Installation Guide](docs/AI_INSTALL.md)
+> 👉 [AI Installation Guide](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md)
 
-**[中文文档](README.md)**
+**[中文文档](https://github.com/ze-mu-zhou/IDACLI/blob/main/README.md)**
 
 </div>
 
@@ -225,7 +225,7 @@ src/ida_cli/
 
 | Document | Description |
 |---|---|
-| [AI Install Guide](docs/AI_INSTALL.md) | Step-by-step setup for AI agents |
+| [AI Install Guide](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md) | Step-by-step setup for AI agents |
 
 ## License
 

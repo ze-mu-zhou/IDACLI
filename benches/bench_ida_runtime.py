@@ -22,7 +22,7 @@ from ida_cli.ai_helpers import AIHelpers
 from ida_cli.artifacts import ArtifactStore
 from ida_cli.kernel import IdaLibBackend, KernelSession, PythonOnlyBackend, create_session
 from ida_cli.runtime import PythonRuntime
-from ida_cli.supervisor import SHARD_CONTIGUOUS, SHARD_STABLE_HASH, make_fanout_plan
+from ida_cli.supervisor import SHARD_CONTIGUOUS, SHARD_STABLE_HASH, FanoutPlan, make_fanout_plan
 
 _BENCHMARK_NAME = "ida_runtime"
 _DEFAULT_TARGET = "python-only-target.i64"
@@ -182,18 +182,23 @@ def _helper_latency(session: KernelSession, iterations: int) -> dict[str, Any]:
 def _fanout_planning(target: str, item_count: int, workers: int, iterations: int) -> dict[str, Any]:
     """Measure deterministic multi-kernel fanout plan construction."""
     items = tuple({"ea": 0x401000 + index * 16, "ordinal": index} for index in range(item_count))
-    contiguous = lambda _index: make_fanout_plan(
-        target_path=target,
-        items=items,
-        worker_count=workers,
-        strategy=SHARD_CONTIGUOUS,
-    )
-    stable_hash = lambda _index: make_fanout_plan(
-        target_path=target,
-        items=items,
-        worker_count=workers,
-        strategy=SHARD_STABLE_HASH,
-    )
+    def contiguous(_index: int) -> FanoutPlan:
+        """Build one contiguous-shard plan; the index is the harness iteration."""
+        return make_fanout_plan(
+            target_path=target,
+            items=items,
+            worker_count=workers,
+            strategy=SHARD_CONTIGUOUS,
+        )
+
+    def stable_hash(_index: int) -> FanoutPlan:
+        """Build one stable-hash-shard plan; the index is the harness iteration."""
+        return make_fanout_plan(
+            target_path=target,
+            items=items,
+            worker_count=workers,
+            strategy=SHARD_STABLE_HASH,
+        )
     sample = contiguous(0)
     return {
         "item_count": item_count,

@@ -38,3 +38,49 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and benches must run from a bare checkout with no install step, so each
+# module inserts src/ on sys.path before importing ida_cli. Those imports cannot
+# move to the top of the file -- being after the shim is the point of it.
+"tests/*.py" = ["E402"]
+"benches/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/ida_cli"]
+# Clean at this level today, so CI can enforce it. Not --strict: that reports
+# 22 further "Returning Any" cases, all of them values crossing the untyped
+# IDAPython boundary, where a cast would assert something this package cannot
+# actually know.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+# IDAPython ships no type information and is absent on any host without IDA.
+module = [
+    "idapro",
+    "idaapi",
+    "idautils",
+    "idc",
+    "ida_auto",
+    "ida_bytes",
+    "ida_entry",
+    "ida_funcs",
+    "ida_gdl",
+    "ida_hexrays",
+    "ida_idaapi",
+    "ida_loader",
+    "ida_nalt",
+    "ida_name",
+    "ida_segment",
+    "ida_typeinf",
+]
+ignore_missing_imports = true
