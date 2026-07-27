@@ -8,9 +8,9 @@ Critical 项已在本次审核后直接修复，不在此清单内。每条均�
 **Important 18 项全部处理完毕：**
 
 - 已修复：1（SystemExit 信封）、2（格式错误保留 id）、3（非 UTF-8 stdin）、4（stdout 线程安全代理）、5（--shutdown 正确性 + SIGTERM 优雅退出）、6（daemon 请求超时）、7（pid/port/token 文件 O_EXCL+0600 加固）、8（banner 握手探活）、9（Ctrl+C 杀 worker）、10（daemon 8+ 测试、新增 test_wsl.py 19 测试）、11（patch 中途失败回滚 + 缓存 finally 失效）、12（持久缓存 DB 指纹 + force= 逃逸）、13（合并优先级文档化）、14（部分资源注册修复）、15（write_artifact 委托 ArtifactStore）、16（LICENSE + license 元数据）
-- 已失效：17、18（skill 支持面调整为 Kimi Code + Codex，hermes flavor 已整体移除；claude flavor 也已移除）
+- 已失效：17、18（hermes flavor 已整体移除；当前 skill 支持面为 Kimi Code + Codex + Claude Code）
 
-**Minor 已修：** protocol CR 注释、kernel close() finally 吞异常、`available()` 改 find_spec、Windows 固定盘枚举、16 MiB 请求行上限、test_runtime 陈旧注释、`_get_connect_host` 死循环、daemon 异常记 stderr、daemon 启动失败带 stderr 尾部证据、快照名 run 唯一化 + 部分失败清理、LocalWorkerPool 文档、`_WSL_HOST` 删除、`int(text,10)` 回退（3 处）、cache `_resolve_ea` 拒绝 BADADDR、export_inventory 摘要一致化、focus 重复目标计数、`_must_succeed` 接受任意真值、README 结构清单补全 + daemon 模式文档（中英）、pyproject authors/urls/classifiers、benchmark 子进程超时、GitHub Actions CI、skill 分发测试对齐 kimi+codex。
+**Minor 已修：** protocol CR 注释、kernel close() finally 吞异常、`available()` 改 find_spec、Windows 固定盘枚举、16 MiB 请求行上限、test_runtime 陈旧注释、`_get_connect_host` 死循环、daemon 异常记 stderr、daemon 启动失败带 stderr 尾部证据、快照名 run 唯一化 + 部分失败清理、LocalWorkerPool 文档、`_WSL_HOST` 删除、`int(text,10)` 回退（3 处）、cache `_resolve_ea` 拒绝 BADADDR、export_inventory 摘要一致化、focus 重复目标计数、`_must_succeed` 接受任意真值、README 结构清单补全 + daemon 模式文档（中英）、pyproject authors/urls/classifiers、benchmark 子进程超时、GitHub Actions CI、skill 分发测试对齐 kimi+codex+claude。
 
 **Minor 保留（需设计决策，未动）：** 信封 schema 合并、supervisor 改名、protocol 错误位置精度、`_resolve_ea` 三处实现合并、模块级 wrapper 生成/删除、合并 last-wins 模式、artifact 磁盘卫生、`"win"` 启发式、BADADDR 64 位回退、AIHelpers CWD 冻结、sdist/MANIFEST.in 分发策略（clone-only 还是 PyPI 需 maintainer 决策）、测试结构类 nits（mega-test 拆分、私有成员断言）。
 

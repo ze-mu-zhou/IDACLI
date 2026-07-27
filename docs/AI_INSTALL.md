@@ -88,7 +88,7 @@ available to Codex on the next turn.
 
 ### Install from a local clone
 
-Install both agent flavors:
+Install all agent flavors:
 
 ```text
 python scripts/install_skill.py all --force
@@ -99,12 +99,14 @@ Install only one flavor:
 ```text
 python scripts/install_skill.py codex --force
 python scripts/install_skill.py kimi --force
+python scripts/install_skill.py claude --force
 ```
 
 Default locations:
 
 - Codex: `%CODEX_HOME%\skills\ida-cli` or `~/.codex/skills/ida-cli`
 - Kimi Code: `%KIMI_CODE_HOME%\skills\ida-cli` or `~/.kimi-code/skills/ida-cli`
+- Claude Code: `%CLAUDE_CONFIG_DIR%\skills\ida-cli` or `~/.claude/skills/ida-cli`
 
 The `ida-cli` Python package provides `ida-ai` and `AgentSession`. The skill
 markdown and agent descriptors still come from this repository or a copied

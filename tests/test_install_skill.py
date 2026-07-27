@@ -75,6 +75,11 @@ class InstallSkillConflictTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self._assert_source_preserved()
 
+    def test_claude_default_root_uses_claude_config_dir(self) -> None:
+        config_root = self.repo / "claude-config"
+        with mock.patch.dict(self.module.os.environ, {"CLAUDE_CONFIG_DIR": str(config_root)}):
+            self.assertEqual(self.module._default_root("claude"), config_root / "skills")
+
 
 if __name__ == "__main__":
     unittest.main()
