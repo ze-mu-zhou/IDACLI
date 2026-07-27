@@ -11,7 +11,7 @@ import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from os import PathLike
-from typing import Any, TextIO
+from typing import IO, Any
 
 from .daemon import DaemonClient, is_daemon_running
 from .protocol import encode_jsonl
@@ -43,21 +43,25 @@ class AgentSession:
     def __init__(
         self,
         process: subprocess.Popen[str] | None = None,
-        stderr_file: TextIO | None = None,
+        stderr_file: IO[str] | None = None,
         *,
         request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
         daemon_client: DaemonClient | None = None,
+        daemon_target: str | None = None,
     ) -> None:
         self._process = process
         self._stderr_file = stderr_file
         self._daemon_client = daemon_client
+        # Only used to spell out the reconnect call in error messages; a
+        # session built straight from a DaemonClient simply has no target.
+        self._daemon_target = daemon_target
+        self._daemon_poison: str | None = None
         self._request_timeout_s = _require_timeout("request_timeout_s", request_timeout_s)
         self._backend: dict[str, Any] | None = None
         self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
         if process is not None:
             self._stdout_thread = _start_stdout_reader(self._require_stdout(), self._stdout_lines)
-        else:
-            self._stdout_thread = None
 
     @classmethod
     def start(
@@ -116,12 +120,23 @@ class AgentSession:
 
     @classmethod
     def connect(cls, target_path: str | PathLike[str], *, request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS) -> "AgentSession":
-        """Connect to an existing daemon without spawning a new kernel."""
+        """Connect to an existing daemon without spawning a new kernel.
+
+        DaemonClient answers a missing daemon, a bad banner, a missing token
+        and a connect timeout with bare RuntimeError/TimeoutError. The bridge
+        documents AgentBridgeError as the one thing callers must catch, so
+        every daemon failure is translated here — see _daemon_transport_error.
+        """
         target = str(target_path)
         client = DaemonClient(target)
-        client.connect()
-        session = cls(None, None, request_timeout_s=request_timeout_s, daemon_client=client)
-        return session
+        try:
+            client.connect()
+        except (OSError, RuntimeError) as exc:
+            # connect() leaves the socket open when it gives up waiting for
+            # the daemon, so release it before the client goes out of scope.
+            client.close()
+            raise _daemon_transport_error(f"could not connect to the daemon for {target!r}", exc) from exc
+        return cls(None, None, request_timeout_s=request_timeout_s, daemon_client=client, daemon_target=target)
 
     @classmethod
     def _start_daemon(cls, target: str, command: Sequence[str] | None, *, request_timeout_s: float, probe_backend: bool, require_ida: bool) -> "AgentSession":
@@ -184,6 +199,10 @@ class AgentSession:
 
         if not isinstance(code, str):
             raise AgentBridgeError("request code must be text")
+        if self._daemon_poison is not None:
+            # Fail before writing: a poisoned connection still accepts bytes
+            # and the daemon would still execute them (see _poison_daemon).
+            raise AgentBridgeError(self._daemon_poison)
         if self._process is not None and self._process.poll() is not None:
             raise AgentBridgeError(self._dead_process_message())
         request: dict[str, Any] = {"code": code}
@@ -222,7 +241,8 @@ class AgentSession:
         if process.stdout is not None and not process.stdout.closed:
             process.stdout.close()
         _join_thread(self._stdout_thread)
-        self._stderr_file.close()
+        if self._stderr_file is not None:
+            self._stderr_file.close()
 
     def __enter__(self) -> "AgentSession":
         return self
@@ -232,7 +252,14 @@ class AgentSession:
 
     def _write_request(self, request: Mapping[str, Any]) -> None:
         if self._daemon_client is not None:
-            self._daemon_client.write(encode_jsonl(dict(request)))
+            try:
+                self._daemon_client.write(encode_jsonl(dict(request)))
+            except (OSError, RuntimeError) as exc:
+                # A half-written request line leaves the daemon parsing our
+                # next request as the tail of this one, so the connection is
+                # finished either way — poison it instead of retrying.
+                self._poison_daemon(f"sending a request failed: {exc}")
+                raise _daemon_transport_error("daemon request write failed", exc) from exc
             return
         if self._process is None or self._process.stdin is None:
             raise AgentBridgeError("agent bridge stdin pipe is unavailable")
@@ -245,20 +272,26 @@ class AgentSession:
     def _read_response(self, timeout_s: float) -> dict[str, Any]:
         if self._daemon_client is not None:
             effective = _require_timeout("timeout_s", timeout_s)
-            self._daemon_client.set_read_timeout(effective)
             try:
-                line = self._daemon_client.readline()
+                line = self._read_daemon_line(effective)
             except socket.timeout as exc:
+                self._poison_daemon(f"a response timed out after {effective:.3f}s")
                 raise AgentBridgeTimeoutError(
-                    f"daemon response timed out after {effective:.3f}s"
+                    f"daemon response timed out after {effective:.3f}s; {self._daemon_reconnect_hint()}"
                 ) from exc
-            finally:
-                self._daemon_client.set_read_timeout(None)
+            except (OSError, RuntimeError) as exc:
+                self._poison_daemon(f"reading a response failed: {exc}")
+                raise _daemon_transport_error("daemon response read failed", exc) from exc
             if not line:
-                raise AgentBridgeError("daemon connection closed unexpectedly")
+                self._poison_daemon("the daemon closed the connection")
+                raise AgentBridgeError(
+                    f"daemon connection closed unexpectedly; {self._daemon_reconnect_hint()}"
+                )
             return self._parse_response(line)
         try:
-            line = self._stdout_lines.get(timeout=_require_timeout("timeout_s", timeout_s))
+            # Distinct name: the daemon branch above yields str, this queue
+            # yields str | None with None meaning "reader hit EOF".
+            queued = self._stdout_lines.get(timeout=_require_timeout("timeout_s", timeout_s))
         except queue.Empty as exc:
             if self._process is not None:
                 self._process.kill()
@@ -269,9 +302,58 @@ class AgentSession:
             raise AgentBridgeTimeoutError(
                 f"kernel response timed out after {timeout_s:.3f}s; stderr_tail={self._stderr_tail()!r}"
             ) from exc
-        if line is None:
+        if queued is None:
             raise AgentBridgeError(self._dead_process_message())
-        return self._parse_response(line)
+        return self._parse_response(queued)
+
+    def _read_daemon_line(self, timeout_s: float) -> str:
+        """Read one daemon line under a read timeout, restoring blocking mode."""
+        client = self._daemon_client
+        if client is None:
+            raise AgentBridgeError("daemon connection is unavailable")
+        client.set_read_timeout(timeout_s)
+        try:
+            return client.readline()
+        finally:
+            # Restoring blocking mode must never mask the read's own failure:
+            # a client closed underneath us answers with RuntimeError here,
+            # which would replace the AgentBridgeTimeoutError the caller needs.
+            try:
+                client.set_read_timeout(None)
+            except (OSError, RuntimeError):
+                pass
+
+    def _poison_daemon(self, reason: str) -> None:
+        """Mark a daemon session unusable so no later request is ever sent.
+
+        Why the session cannot simply carry on: CPython's SocketIO latches
+        _timeout_occurred the first time a read times out, so every later
+        readline() on that makefile raises a bare OSError — outside the
+        AgentBridgeError hierarchy, so callers' `except AgentBridgeError`
+        misses it — while _write_request still succeeds and the daemon still
+        EXECUTES the code. A loop of ai.rename() calls then reports renames
+        as failed that in fact landed in the database.
+
+        Why not rebuild the makefile and resynchronise: the timed-out
+        response is still in flight, and requests sent without an id make
+        _validate_response_id a no-op, so that stale answer would silently be
+        handed to the *next* request. A loud dead session beats a quiet
+        desync; the caller reconnects with AgentSession.connect().
+
+        The first reason wins — it is the root cause the caller must see —
+        and the socket is deliberately left open: the flag already stops
+        every further byte, and close()/__exit__ still releases it.
+        """
+        if self._daemon_poison is None:
+            self._daemon_poison = f"daemon session is unusable ({reason}); {self._daemon_reconnect_hint()}"
+
+    def _daemon_reconnect_hint(self) -> str:
+        """Say why nothing more will be sent and exactly how to get a live session."""
+        target = "<target path>" if self._daemon_target is None else repr(self._daemon_target)
+        return (
+            "this session sends nothing further because the daemon may still be "
+            f"executing that request; reconnect with AgentSession.connect({target})"
+        )
 
     def _parse_response(self, line: str) -> dict[str, Any]:
         try:
@@ -282,8 +364,11 @@ class AgentSession:
             raise AgentBridgeError("kernel response is not a protocol object")
         return response
 
-    def _require_stdout(self) -> TextIO:
-        stdout = self._process.stdout
+    def _require_stdout(self) -> IO[str]:
+        process = self._process
+        if process is None:
+            raise AgentBridgeError("agent bridge subprocess is unavailable")
+        stdout = process.stdout
         if stdout is None:
             raise AgentBridgeError("agent bridge stdout pipe is unavailable")
         return stdout
@@ -299,7 +384,22 @@ class AgentSession:
         return _stream_tail(self._stderr_file, _STDERR_TAIL_CHARS)
 
 
-def _stream_tail(stream: TextIO, max_chars: int) -> str:
+def _daemon_transport_error(message: str, exc: BaseException) -> AgentBridgeError:
+    """Map one daemon transport failure onto the documented bridge hierarchy.
+
+    daemon.py answers transport problems with bare RuntimeError, TimeoutError
+    and OSError, none of which a caller's `except AgentBridgeError` catches,
+    so every DaemonClient call an AgentSession makes is translated here. A
+    TimeoutError keeps its timeout identity so "the daemon was too slow"
+    stays distinguishable from "the transport broke".
+    """
+    if isinstance(exc, AgentBridgeError):
+        return exc  # already in the hierarchy; re-wrapping would drop .response
+    error_type = AgentBridgeTimeoutError if isinstance(exc, TimeoutError) else AgentBridgeError
+    return error_type(f"{message}: {type(exc).__name__}: {exc}")
+
+
+def _stream_tail(stream: IO[str], max_chars: int) -> str:
     """Return the last max_chars of a seekable text stream."""
     stream.flush()
     end = stream.tell()
@@ -318,13 +418,13 @@ def _response_error_message(response: Mapping[str, Any]) -> str:
     return f"{error_type}: {message}"
 
 
-def _start_stdout_reader(stream: TextIO, output: queue.Queue[str | None]) -> threading.Thread:
+def _start_stdout_reader(stream: IO[str], output: queue.Queue[str | None]) -> threading.Thread:
     thread = threading.Thread(target=_read_stdout_lines, args=(stream, output), daemon=True)
     thread.start()
     return thread
 
 
-def _read_stdout_lines(stream: TextIO, output: queue.Queue[str | None]) -> None:
+def _read_stdout_lines(stream: IO[str], output: queue.Queue[str | None]) -> None:
     try:
         for line in stream:
             output.put(line)
