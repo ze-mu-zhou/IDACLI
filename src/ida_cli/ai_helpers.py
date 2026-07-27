@@ -95,7 +95,7 @@ class AIHelpers:
         func = ida_funcs.get_func(ea)
         if func is None:
             raise AIHelperError(f"no function contains 0x{ea:x}")
-        return self._function_record(int(getattr(func, "start_ea")), func)
+        return self._function_record(int(func.start_ea), func)
 
     def decompile(self, ea_or_name: int | str) -> dict[str, Any]:
         """Return Hex-Rays pseudocode and never fall back to disassembly."""
@@ -158,7 +158,7 @@ class AIHelpers:
                 break
             records.append(
                 {
-                    "ea": int(getattr(item, "ea")),
+                    "ea": int(item.ea),
                     "length": self._optional_int(item, "length"),
                     "type": self._optional_int(item, "type"),
                     "value": str(item),
@@ -176,10 +176,15 @@ class AIHelpers:
             if module_name is None:
                 raise AIHelperError(f"import module {module_index} has no name")
 
-            def collect(ea: int, name: str | None, ordinal: int | None) -> bool:
+            def collect(
+                ea: int,
+                name: str | None,
+                ordinal: int | None,
+                import_module: str = module_name,
+            ) -> bool:
                 records.append(
                     {
-                        "module": module_name,
+                        "module": import_module,
                         "ea": int(ea),
                         "name": name,
                         "ordinal": None if ordinal is None else int(ordinal),
@@ -904,12 +909,12 @@ class AIHelpers:
     def _cfg_record(self, func: Any, flowchart: Iterable[Any]) -> dict[str, Any]:
         raw_blocks: list[tuple[Any, dict[str, Any]]] = []
         for index, block in enumerate(flowchart):
-            start = int(getattr(block, "start_ea"))
-            end = int(getattr(block, "end_ea"))
+            start = int(block.start_ea)
+            end = int(block.end_ea)
             raw_blocks.append((block, {"id": index, "start_ea": start, "end_ea": end, "size": max(0, end - start)}))
         start_to_id = {record["start_ea"]: record["id"] for _block, record in raw_blocks}
         edges = self._cfg_edges(raw_blocks, start_to_id)
-        return {"function": self._function_record(int(getattr(func, "start_ea")), func), "blocks": [r for _b, r in raw_blocks], "edges": edges}
+        return {"function": self._function_record(int(func.start_ea), func), "blocks": [r for _b, r in raw_blocks], "edges": edges}
 
     def _cfg_edges(self, raw_blocks: list[tuple[Any, dict[str, Any]]], start_to_id: Mapping[int, int]) -> list[dict[str, Any]]:
         edges: list[dict[str, Any]] = []
@@ -917,7 +922,7 @@ class AIHelpers:
             if not hasattr(block, "succs"):
                 continue
             for successor in block.succs():
-                dst_start = int(getattr(successor, "start_ea"))
+                dst_start = int(successor.start_ea)
                 edges.append(
                     {
                         "src": int(record["id"]),
@@ -984,11 +989,11 @@ class AIHelpers:
         raise AIHelperError(f"cannot advance disassembly cursor at 0x{ea:x}")
 
     def _xref_record(self, xref: Any) -> dict[str, Any]:
-        record = {"frm": int(getattr(xref, "frm")), "to": int(getattr(xref, "to"))}
+        record = {"frm": int(xref.frm), "to": int(xref.to)}
         if hasattr(xref, "type"):
-            record["type"] = int(getattr(xref, "type"))
+            record["type"] = int(xref.type)
         if hasattr(xref, "iscode"):
-            record["iscode"] = bool(getattr(xref, "iscode"))
+            record["iscode"] = bool(xref.iscode)
         return record
 
     def _artifacts(self) -> Any:

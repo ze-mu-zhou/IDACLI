@@ -288,7 +288,8 @@ def _win32_fixed_drive_roots() -> tuple[Path, ...]:
     """Enumerate ready fixed drives via Win32 without probing disconnected shares."""
     import ctypes
 
-    kernel32 = getattr(ctypes, "windll").kernel32
+    ctypes_api: Any = ctypes
+    kernel32 = ctypes_api.windll.kernel32
     drives_bitmask = kernel32.GetLogicalDrives()
     roots: list[Path] = []
     for index, letter in enumerate(string.ascii_uppercase):

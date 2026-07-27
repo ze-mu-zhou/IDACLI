@@ -395,9 +395,9 @@ def _coerce_shard(shard: Any) -> _PoolShard:
         worker_id = shard.get("worker_id")
         items = shard.get("items")
     else:
-        shard_id = getattr(shard, "shard_id")
-        worker_id = getattr(shard, "worker_id")
-        items = getattr(shard, "items")
+        shard_id = shard.shard_id
+        worker_id = shard.worker_id
+        items = shard.items
     if items is None or isinstance(items, (bytes, str)):
         raise TypeError("shard items must be an iterable of JSON-compatible values")
     return _PoolShard(

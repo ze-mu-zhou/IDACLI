@@ -493,8 +493,10 @@ class IDACache:
                 candidates = self._ambiguous_names.get(text)
                 if candidates is not None:
                     choices = ", ".join(f"0x{ea:x}" for ea in candidates)
-                    raise CacheError(f"name {text!r} is ambiguous in refreshed cache; candidates: {choices}")
-                raise CacheError(f"name is not present in refreshed cache: {text!r}")
+                    raise CacheError(
+                        f"name {text!r} is ambiguous in refreshed cache; candidates: {choices}"
+                    ) from None
+                raise CacheError(f"name is not present in refreshed cache: {text!r}") from None
         return self._checked_ea(value)
 
     def _checked_ea(self, ea: int) -> int:

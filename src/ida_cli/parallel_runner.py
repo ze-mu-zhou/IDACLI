@@ -266,7 +266,7 @@ class JsonlWorkerProcess:
                 line = self._stdout_lines.get(timeout=min(0.05, remaining))
             except queue.Empty:
                 if process.poll() is not None:
-                    raise self._process_crash("worker exited before response")
+                    raise self._process_crash("worker exited before response") from None
                 continue
             if line is None:
                 if process.poll() is None:

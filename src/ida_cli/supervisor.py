@@ -139,7 +139,7 @@ class FanoutPlan:
         object.__setattr__(self, "strategy", _require_strategy(self.strategy))
         if len(self.worker_specs) != len(self.shards):
             raise ValueError("worker_specs and shards must have the same length")
-        for spec, shard in zip(self.worker_specs, self.shards):
+        for spec, shard in zip(self.worker_specs, self.shards, strict=True):
             if not isinstance(spec, WorkerSpec):
                 raise TypeError("worker_specs must contain WorkerSpec instances")
             if not isinstance(shard, WorkShard):
@@ -224,7 +224,7 @@ def make_work_shards(
             strategy=selected_strategy,
             items=part,
         )
-        for index, (spec, part) in enumerate(zip(specs, parts))
+        for index, (spec, part) in enumerate(zip(specs, parts, strict=True))
     )
 
 
