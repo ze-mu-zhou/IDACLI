@@ -11,12 +11,13 @@ import time
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 _EXPORT_SCHEMA = "ida-cli-cache-index-v1"
 _EXPORT_VERSION = 1
 _PERSIST_KIND = "ida-cli-cache-persistent-v1"
 _BADADDR = (1 << 64) - 1
+_T = TypeVar("_T")
 # Every field is optional and compared only when both sides have it, so keys may
 # be appended: snapshots written before a key existed store nothing for it and
 # keep loading. When changing this, obey _check_fingerprint's None-skip rule.
@@ -463,7 +464,8 @@ class IDACache:
         """Return provider xrefs for every instruction in a function."""
 
         if hasattr(self._provider, "function_xrefs_from"):
-            return _method(self._provider, "function_xrefs_from")(function.copy())
+            value = _method(self._provider, "function_xrefs_from")(function.copy())
+            return _records(value, "function_xrefs_from")
         if hasattr(self._provider, "function_items") and hasattr(self._provider, "xrefs_from"):
             return _flatten_function_item_xrefs(self._provider, function)
         raise CacheError("call edge cache requires function_xrefs_from or function_items plus xrefs_from")
@@ -915,7 +917,7 @@ def _sorted_decompile(cache: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     return [cache[key].copy() for key in sorted(cache)]
 
 
-def _clone(value: Any) -> Any:
+def _clone(value: _T) -> _T:
     """Return a defensive copy so callers cannot mutate cache internals.
 
     Everything reaching this walker is already JSON-shaped -- dicts with
@@ -928,14 +930,15 @@ def _clone(value: Any) -> Any:
 
     kind = type(value)
     if kind is dict:
-        copied = value.copy()
+        copied = cast(dict[Any, Any], value).copy()
         for key, item in copied.items():
             item_kind = type(item)
             if item_kind is dict or item_kind is list:
                 copied[key] = _clone(item)
-        return copied
+        return cast(_T, copied)
     if kind is list:
-        return [_clone(item) for item in value]
+        items = cast(list[Any], value)
+        return cast(_T, [_clone(item) for item in items])
     if kind in _IMMUTABLE_LEAF_TYPES:
         return value
     # Anything else (tuple, set, a dict subclass, an IDA object that slipped

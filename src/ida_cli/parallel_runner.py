@@ -620,7 +620,7 @@ def parse_worker_response(line: str) -> dict[str, Any]:
         raise WorkerProtocolError("successful worker response missing result")
     if not payload["ok"] and not isinstance(payload.get("error"), dict):
         raise WorkerProtocolError("failed worker response missing error object")
-    return json_compatible_value(payload)
+    return _json_object(payload, "worker response")
 
 
 def worker_response_to_result(
@@ -743,7 +743,7 @@ def _join_thread(thread: threading.Thread | None) -> None:
 def _request_payload(request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(request, Mapping):
         raise TypeError("request must be a mapping")
-    return json_compatible_value(dict(request))
+    return _json_object(dict(request), "request")
 
 
 def _validate_response_id(request: Mapping[str, Any], response: Mapping[str, Any]) -> None:
@@ -756,7 +756,7 @@ def _validate_response_id(request: Mapping[str, Any], response: Mapping[str, Any
 def _response_payload(response: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
-    payload = json_compatible_value(dict(response))
+    payload = _json_object(dict(response), "response")
     if type(payload.get("ok")) is not bool:
         raise WorkerProtocolError("worker response field ok must be a boolean")
     if payload["ok"] and "result" not in payload:
@@ -764,6 +764,15 @@ def _response_payload(response: Mapping[str, Any]) -> dict[str, Any]:
     if not payload["ok"] and not isinstance(payload.get("error"), dict):
         raise WorkerProtocolError("failed worker response missing error object")
     return payload
+
+
+def _json_object(value: Any, label: str) -> dict[str, Any]:
+    """Normalize and require one JSON object at a typed protocol boundary."""
+
+    normalized = json_compatible_value(value)
+    if not isinstance(normalized, dict):
+        raise TypeError(f"{label} must be a JSON object")
+    return normalized
 
 
 def _success_payload(response: Mapping[str, Any]) -> dict[str, Any]:

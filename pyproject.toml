@@ -56,15 +56,9 @@ select = ["E4", "E7", "E9", "F", "B", "UP", "PYI", "RUF", "BLE"]
 [tool.mypy]
 python_version = "3.11"
 files = ["src/ida_cli"]
-# Clean at this level today, so CI can enforce it. Not --strict: that reports
-# 22 further "Returning Any" cases, all of them values crossing the untyped
-# IDAPython boundary, where a cast would assert something this package cannot
-# actually know.
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_optional = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
+# Runtime checks narrow dynamic JSON, IO, and IDAPython boundaries before
+# values enter typed internals, so CI can enforce mypy's complete strict set.
+strict = true
 
 [[tool.mypy.overrides]]
 # IDAPython ships no type information and is absent on any host without IDA.

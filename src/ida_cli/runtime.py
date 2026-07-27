@@ -52,7 +52,7 @@ class _ThreadRoutedStream:
 
     def _target(self) -> TextIO:
         buffer = getattr(_CAPTURE_LOCAL, self._buffer_attr, None)
-        if buffer is not None:
+        if isinstance(buffer, io.StringIO):
             return buffer
         if threading.current_thread() is _MAIN_THREAD:
             return self._passthrough

@@ -185,10 +185,12 @@ def _byte_after(change: Mapping[str, Any], address: int) -> str:
     target = _target(change)
     start = _ea(target)
     after = change.get("after")
-    if not isinstance(after, Mapping) or not isinstance(after.get("bytes"), str):
+    if not isinstance(after, Mapping):
+        raise ConflictMergeError("patch_bytes.after.bytes must be a hex string")
+    hex_text = after.get("bytes")
+    if not isinstance(hex_text, str):
         raise ConflictMergeError("patch_bytes.after.bytes must be a hex string")
     offset = address - start
-    hex_text = after["bytes"]
     index = offset * 2
     if offset < 0 or index + 2 > len(hex_text):
         raise ConflictMergeError("changed byte address is outside patch range")

@@ -430,7 +430,7 @@ class _MainThreadExecutor:
 
     def __init__(self, runtime: Any, timings: DaemonTimings = DEFAULT_TIMINGS) -> None:
         self._runtime = runtime
-        self._work: queue.Queue = queue.Queue()
+        self._work: queue.Queue[tuple[Any, dict[str, Any], threading.Event]] = queue.Queue()
         self._stop = threading.Event()
         self._timings = timings
         self._exec_timeout = timings.resolved_exec_timeout()
@@ -989,8 +989,8 @@ class DaemonClient:
         self._timings = timings
         self._addr: tuple[str, int] | None = None
         self._sock: socket.socket | None = None
-        self._stdin: Any = None
-        self._stdout: Any = None
+        self._stdin: TextIO | None = None
+        self._stdout: TextIO | None = None
 
     def connect(self) -> None:
         """Connect to the daemon, validate its protocol banner, and authenticate."""
@@ -1025,7 +1025,7 @@ class DaemonClient:
     def _read_banner(self) -> None:
         """Require the peer's first line to be the ida-cli daemon banner."""
         try:
-            line = self._stdout.readline()
+            line = self.readline()
         except OSError as exc:
             self.close()
             raise RuntimeError(

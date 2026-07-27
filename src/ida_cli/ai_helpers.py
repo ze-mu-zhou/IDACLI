@@ -6,7 +6,10 @@ import importlib
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import chain
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .artifacts import ArtifactStore
 
 
 class AIHelperError(RuntimeError):
@@ -31,7 +34,7 @@ class AIHelpers:
         *,
         modules: Mapping[str, Any] | None = None,
         auto_import: bool = True,
-        artifact_store: Any | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> None:
         # Keep artifact IO available outside IDA; when changing this, obey path containment checks.
         self._artifact_dir = Path(artifact_dir) if artifact_dir is not None else Path.cwd() / "artifacts"
@@ -40,7 +43,7 @@ class AIHelpers:
         # that no longer named the run they belong to; and the module-level
         # singleton would silently bind cwd/artifacts, letting an agent read a
         # stale ./artifacts/ tree whose sha256 matched nothing it just wrote.
-        self._artifact_store: Any | None = artifact_store
+        self._artifact_store: ArtifactStore | None = artifact_store
         # Keep tests deterministic by allowing injected modules; when changing this, obey lazy import semantics.
         self._modules = dict(modules) if modules is not None else {}
         self._auto_import = auto_import
@@ -307,7 +310,10 @@ class AIHelpers:
     def basic_blocks(self, ea_or_name: int | str) -> list[dict[str, Any]]:
         """Return basic blocks for the containing function."""
 
-        return self.cfg(ea_or_name)["blocks"]
+        blocks = self.cfg(ea_or_name)["blocks"]
+        if not isinstance(blocks, list):
+            raise AIHelperError("CFG blocks must be a list")
+        return blocks
 
     def cfg(self, ea_or_name: int | str) -> dict[str, Any]:
         """Return a compact FlowChart CFG for the containing function."""
@@ -996,7 +1002,7 @@ class AIHelpers:
             record["iscode"] = bool(xref.iscode)
         return record
 
-    def _artifacts(self) -> Any:
+    def _artifacts(self) -> ArtifactStore:
         """Return the lazily created ArtifactStore bound to this helper's directory."""
 
         if self._artifact_store is None:
