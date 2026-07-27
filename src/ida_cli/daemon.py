@@ -19,16 +19,19 @@ execution inside the (non-thread-safe) kernel runtime.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
 import os
 import queue
+import re
 import secrets
 import socket
 import sys
 import threading
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -43,6 +46,122 @@ _STARTUP_POLL_INTERVAL = 0.05  # seconds
 _STARTUP_TIMEOUT = 15.0  # seconds
 _BANNER_HELLO = "ida-cli-daemon"
 _BANNER_VERSION = 1
+# A WSL Windows-drive mount is exactly one letter: /mnt/d or /mnt/d/...
+_MNT_DRIVE_RE = re.compile(r"^/mnt/([A-Za-z])($|/)")
+_PROBE_TIMEOUT = 3.0  # seconds a liveness probe waits for connect + banner
+# A token line is ~80 bytes. The 16 MiB request cap lives past authentication,
+# so without this an unauthenticated peer could stream unbounded data into one
+# connection buffer (measured: 1 GiB in ~2.4 s, daemon RSS +1.1 GiB).
+_MAX_AUTH_LINE_CHARS = 4096
+# accept() failing for lack of descriptors is transient, not fatal.
+_ACCEPT_RETRYABLE_ERRNOS = frozenset(
+    code for code in (getattr(errno, name, None) for name in ("EMFILE", "ENFILE", "ENOBUFS", "ENOMEM"))
+    if code is not None
+)
+_ACCEPT_BACKOFF = 0.05  # seconds to wait out descriptor pressure before retrying
+_OWNER_PROBE_ATTEMPTS = 3  # liveness probes after losing the O_EXCL race
+_OWNER_PROBE_INTERVAL = 0.5  # seconds between probes; the winner may still be starting
+# Startup probes retry, so each one stays short: a dead port must not make
+# every daemon launch pay the full tolerant timeout three times over.
+_OWNER_PROBE_TIMEOUT = 0.5
+_EXEC_TIMEOUT_ENV = "IDA_CLI_EXEC_TIMEOUT"
+_DEFAULT_EXEC_TIMEOUT = 300.0  # seconds one request may occupy the kernel
+_EXECUTE_WAIT_MARGIN = 5.0  # grace beyond the budget in execute_request
+_WATCHDOG_POLL = 0.1  # seconds between watchdog checks
+_WATCHDOG_REFIRE = 1.0  # seconds between async-exception deliveries
+
+
+@dataclass(frozen=True, slots=True)
+class DaemonTimings:
+    """Every wall-clock knob one daemon or client obeys; defaults are production.
+
+    Injected rather than read from module globals so callers -- above all
+    tests -- can exercise the real timing code paths at millisecond scale
+    instead of sleeping through production timeouts. Patching the globals
+    instead makes concurrent daemons in one process fight over shared
+    state, which is exactly the flakiness this replaces.
+
+    ``exec_timeout=None`` defers to IDA_CLI_EXEC_TIMEOUT and then to
+    _DEFAULT_EXEC_TIMEOUT, so injecting timings never silently overrides an
+    operator's environment.
+    """
+
+    auth_timeout: float = _AUTH_TIMEOUT
+    exec_timeout: float | None = None
+    execute_wait_margin: float = _EXECUTE_WAIT_MARGIN
+    watchdog_poll: float = _WATCHDOG_POLL
+    watchdog_refire: float = _WATCHDOG_REFIRE
+    owner_probe_attempts: int = _OWNER_PROBE_ATTEMPTS
+    owner_probe_interval: float = _OWNER_PROBE_INTERVAL
+    owner_probe_timeout: float = _OWNER_PROBE_TIMEOUT
+    startup_timeout: float = _STARTUP_TIMEOUT
+    startup_poll_interval: float = _STARTUP_POLL_INTERVAL
+
+    def resolved_exec_timeout(self) -> float:
+        """Return the effective per-request budget in seconds."""
+        return _exec_timeout_seconds() if self.exec_timeout is None else self.exec_timeout
+
+    def scaled(self, factor: float) -> "DaemonTimings":
+        """Return the same knobs scaled by factor; handy for slow CI hosts."""
+        return replace(
+            self,
+            auth_timeout=self.auth_timeout * factor,
+            exec_timeout=None if self.exec_timeout is None else self.exec_timeout * factor,
+            execute_wait_margin=self.execute_wait_margin * factor,
+            watchdog_poll=self.watchdog_poll * factor,
+            watchdog_refire=self.watchdog_refire * factor,
+            owner_probe_interval=self.owner_probe_interval * factor,
+            owner_probe_timeout=self.owner_probe_timeout * factor,
+            startup_timeout=self.startup_timeout * factor,
+            startup_poll_interval=self.startup_poll_interval * factor,
+        )
+
+
+DEFAULT_TIMINGS = DaemonTimings()
+
+
+class _RequestInterrupt(Exception):
+    """Raised asynchronously in the serving thread when a request overruns its budget."""
+
+
+def _exec_timeout_seconds() -> float:
+    """Return the per-request execution budget; IDA_CLI_EXEC_TIMEOUT overrides."""
+    raw = os.environ.get(_EXEC_TIMEOUT_ENV)
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return _DEFAULT_EXEC_TIMEOUT
+
+
+def _raise_async_in_thread(ident: int, exc_type: type[BaseException]) -> bool:
+    """Deliver exc_type to a running thread; return False when unsupported.
+
+    PyThreadState_SetAsyncExc is CPython's only cross-thread interrupt and is
+    inherently blunt: the exception can surface inside finally blocks or —
+    when it lands late — during the next request. Callers must narrow that
+    window with a generation check and tolerate late delivery; code that
+    cannot use ctypes (non-CPython) degrades to logging only.
+    """
+    try:
+        import ctypes
+        set_async = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    except (ImportError, AttributeError):
+        return False
+    set_async.argtypes = (ctypes.c_ulong, ctypes.py_object)
+    set_async.restype = ctypes.c_int
+    raised = set_async(ctypes.c_ulong(ident), ctypes.py_object(exc_type))
+    if raised == 0:
+        return False  # thread already gone
+    if raised > 1:
+        # Defensive: the API promises 0/1 for one ident; undo rather than
+        # leave exceptions pending in unknown threads.
+        set_async(ctypes.c_ulong(ident), None)
+        return False
+    return True
 
 
 def _get_connect_host() -> str:
@@ -168,11 +287,16 @@ def _normalize_target_path(path: str) -> str:
     while on Windows resolve() is exactly what canonicalizes 8.3/case
     spellings. Every other spelling is resolved to an absolute path so that
     relative and absolute references to the same target hash identically.
+
+    Only ^/mnt/<letter>($|/) counts as a drive mapping: guessing a drive
+    from longer names ("/mnt/data/..." → "D:\\ta\\...") both corrupts the
+    path and collides with genuine /mnt/d/ta/... spellings.
     """
     p = path.replace("\\", "/")
-    if p.startswith("/mnt/") and len(p) > 6:
-        drive = p[5].upper()
-        tail = p[7:]
+    match = _MNT_DRIVE_RE.match(p)
+    if match:
+        drive = match.group(1).upper()
+        tail = p[match.end():].strip("/")
         sep = "\\"
         return f"{drive}:{sep}{tail.replace('/', sep)}"
     if os.name != "nt" and len(p) >= 3 and p[0].isalpha() and p[1] == ":" and p[2] == "/":
@@ -195,26 +319,29 @@ def get_token_path(target_path: str) -> str:
     return str(get_daemon_dir() / f"{get_target_id(target_path)}.token")
 
 
-def is_daemon_running(target_path: str) -> bool:
+def is_daemon_running(target_path: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
     """Check whether a daemon for this target is alive.
 
     A bare TCP connect is not enough — a crashed daemon's port may be reused
     by an unrelated service. Probe the protocol banner instead: only a real
     ida-cli daemon identifies itself with {"hello": "ida-cli-daemon"}.
+
+    timeout bounds both the connect and the banner read. Keep it generous:
+    a busy daemon that answers late must not be reported dead, because
+    callers turn that into "no daemon running" and either refuse to connect
+    or try to start a duplicate.
     """
-    pid_path = get_pid_path(target_path)
     port_path = get_port_path(target_path)
-    if not Path(pid_path).is_file() or not Path(port_path).is_file():
+    if not Path(get_pid_path(target_path)).is_file() or not Path(port_path).is_file():
         return False
     try:
-        pid = int(Path(pid_path).read_text().strip())
         port = int(Path(port_path).read_text().strip())
     except (OSError, ValueError):
         return False
     # Verify the peer speaks the ida-cli daemon protocol (PID check unreliable cross-platform)
     try:
         host = _get_connect_host()
-        probe = socket.create_connection((host, port), timeout=0.5)
+        probe = socket.create_connection((host, port), timeout=timeout)
         try:
             reader = probe.makefile(mode="r", encoding="utf-8", errors="replace")
             try:
@@ -246,13 +373,11 @@ def _write_private_file(path: str, content: str) -> None:
 
     Uses O_CREAT | O_EXCL (plus O_NOFOLLOW where available) so a file or
     symlink appearing between cleanup and write is never followed or
-    overwritten — an existing path means a lost race or an attack.
+    overwritten — an existing path means a lost race or an attack, and the
+    caller decides whether it is stale or belongs to a live daemon.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError(f"refusing to overwrite existing daemon file: {path}") from exc
+    fd = os.open(path, flags, 0o600)
     try:
         os.write(fd, content.encode())
     finally:
@@ -261,6 +386,25 @@ def _write_private_file(path: str, content: str) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+class DaemonRunningError(RuntimeError):
+    """Raised when registration files belong to another live daemon."""
+
+
+def _probe_owner_alive(target_path: str, timings: DaemonTimings = DEFAULT_TIMINGS) -> bool:
+    """Probe for a live daemon, retrying while the winner's accept loop starts.
+
+    The race winner can hold the registration files for a moment before its
+    accept loop answers the banner probe, so one negative answer is not
+    proof of a stale file.
+    """
+    for attempt in range(timings.owner_probe_attempts):
+        if is_daemon_running(target_path, timeout=timings.owner_probe_timeout):
+            return True
+        if attempt + 1 < timings.owner_probe_attempts:
+            time.sleep(timings.owner_probe_interval)
+    return False
 
 
 def _banner_payload() -> dict[str, Any]:
@@ -273,54 +417,258 @@ class _MainThreadExecutor:
 
     IDA only answers API calls from the thread that opened the database, so
     connection threads hand requests over a queue and wait for the answer.
+
+    A watchdog thread bounds every request to the execution budget (default
+    300s, IDA_CLI_EXEC_TIMEOUT overrides): an overrun gets _RequestInterrupt
+    delivered asynchronously into the serving thread, so even a tight
+    `while True: pass` bytecode loop is interrupted and the daemon keeps
+    serving later requests. execute_request itself also waits with a
+    deadline (budget + margin) as a last-resort backstop in case the
+    watchdog cannot fire (e.g. no ctypes on a non-CPython host).
     """
 
-    def __init__(self, runtime: Any) -> None:
+    def __init__(self, runtime: Any, timings: DaemonTimings = DEFAULT_TIMINGS) -> None:
         self._runtime = runtime
         self._work: queue.Queue = queue.Queue()
         self._stop = threading.Event()
+        self._timings = timings
+        self._exec_timeout = timings.resolved_exec_timeout()
+        # Watchdog state: guarded by _state_lock; the epoch counts request
+        # starts/ends so the watchdog never interrupts a *new* request.
+        self._state_lock = threading.Lock()
+        self._serve_ident: int | None = None
+        self._request_started: float | None = None
+        self._request_epoch = 0
+        self._last_interrupt_at = 0.0
+        self._watchdog: threading.Thread | None = None
+        # Separate from _stop on purpose: stop() means "abandon the in-flight
+        # request", which is exactly when the watchdog is needed most. Only
+        # serve() returning retires the watchdog.
+        self._watchdog_stop = threading.Event()
 
     def execute_request(self, request: Any) -> Any:
-        """Enqueue one request and wait for the serving thread to answer."""
+        """Enqueue one request and wait for the serving thread to answer.
+
+        The budget is charged from the moment the serving thread DEQUEUES
+        the request, not from enqueue. Charging queue time to the waiter tore
+        down a perfectly healthy client that was merely sitting behind a slow
+        one -- and its request then executed against the database anyway,
+        because nothing ever told the serving thread the caller had left.
+
+        A waiter that does give up marks its box abandoned, and _serve_one
+        refuses to run an abandoned request. Two distinct give-up reasons are
+        reported so an operator can tell "your own request ran too long" from
+        "the kernel never got to your request".
+        """
         box: dict[str, Any] = {}
         done = threading.Event()
         self._work.put((request, box, done))
-        done.wait()
+        limit = self._exec_timeout + self._timings.execute_wait_margin
+        idle_since = time.monotonic()
+        last_epoch = self._request_epoch
+        while not done.wait(timeout=self._timings.watchdog_poll):
+            if self._stop.is_set():
+                self._abandon(box)
+                raise RuntimeError("daemon executor stopped while the request was in flight")
+            now = time.monotonic()
+            started_at = box.get("started_at")
+            if started_at is not None:
+                if now - started_at >= limit:
+                    self._abandon(box)
+                    raise TimeoutError("daemon request outlived the execution budget and its margin")
+                continue
+            # Still queued. Waiting behind healthy work is not this request's
+            # fault, so the clock only runs while the executor makes NO
+            # progress: every start or finish bumps the epoch and resets it.
+            # A stalled epoch means the kernel is stuck on something the
+            # watchdog cannot interrupt -- a long native IDA call offers no
+            # bytecode boundary to deliver an exception at.
+            epoch = self._request_epoch
+            if epoch != last_epoch:
+                last_epoch = epoch
+                idle_since = now
+            elif now - idle_since >= limit:
+                self._abandon(box)
+                raise TimeoutError(
+                    "daemon request was never executed: the kernel stopped making progress"
+                )
         if "error" in box:
             raise box["error"]
         return box["response"]
 
+    def _abandon(self, box: dict[str, Any]) -> None:
+        """Mark a request as no longer wanted, under the start/finish lock.
+
+        Taking _state_lock makes abandonment atomic against _begin_request,
+        so a request can never be observed as "not abandoned" and then be
+        abandoned between that check and the call into the runtime.
+        """
+        with self._state_lock:
+            box["abandoned"] = True
+
     def serve(self) -> None:
-        """Drain queued requests until stopped; call from the serving thread."""
-        while not self._stop.is_set():
+        """Drain queued requests until stopped; call from the serving thread.
+
+        On exit, still-queued requests are answered with an error so their
+        waiting connection threads release instead of hanging forever.
+        """
+        with self._state_lock:
+            self._serve_ident = threading.get_ident()
+        self._start_watchdog()
+        try:
+            while not self._stop.is_set():
+                try:
+                    self._serve_one()
+                except _RequestInterrupt:
+                    # Async delivery that landed outside a request body (the
+                    # queue wait, or after the answer was already recorded).
+                    # It must never escape: serve_forever only unwinds on
+                    # KeyboardInterrupt, so anything else kills the daemon.
+                    continue
+        finally:
+            self._watchdog_stop.set()
+            self._answer_leftovers()
+            with self._state_lock:
+                self._serve_ident = None
+
+    def _serve_one(self) -> None:
+        """Run at most one queued request, always answering its waiter.
+
+        Every step after the request leaves the queue sits inside the
+        try/finally, so a late _RequestInterrupt becomes that request's
+        error instead of stranding a connection thread on ``done``.
+        """
+        try:
+            request, box, done = self._work.get(timeout=self._timings.watchdog_poll)
+        except queue.Empty:
+            return
+        try:
+            if not self._begin_request(box):
+                # The waiter gave up before we reached this request. Running it
+                # would mutate the database on behalf of a caller that already
+                # recorded the operation as failed.
+                box["error"] = RuntimeError("request abandoned by its caller before execution")
+                return
+            box["response"] = self._runtime.execute_request(request)
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            # _begin_request lives inside this try on purpose: it takes
+            # _state_lock, which is exactly where a late async interrupt lands,
+            # and outside the try that would strand the waiter on ``done``.
+            self._end_request(done)
+
+    def _begin_request(self, box: dict[str, Any]) -> bool:
+        """Start the budget clock, or report that the waiter already left.
+
+        Publishing the dequeue time into the box is what lets execute_request
+        charge the budget from execution rather than from enqueue; the
+        abandonment check shares this lock so the two can never interleave.
+        """
+        with self._state_lock:
+            if box.get("abandoned"):
+                return False
+            self._request_started = time.monotonic()
+            box["started_at"] = self._request_started
+            self._request_epoch += 1
+            return True
+
+    def _end_request(self, done: threading.Event) -> None:
+        """Clear in-flight state and release the waiter, retrying past interrupts.
+
+        The watchdog holds _state_lock across its ctypes call, so a serving
+        thread that reaches this point mid-fire parks on that very lock and
+        takes the exception the instant it acquires it. Retrying is safe:
+        the assignments and ``done.set()`` are both idempotent, and once
+        _request_started is None the watchdog cannot fire again.
+        """
+        while True:
             try:
-                request, box, done = self._work.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            try:
-                box["response"] = self._runtime.execute_request(request)
-            except BaseException as exc:
-                box["error"] = exc
-            finally:
+                with self._state_lock:
+                    self._request_started = None
+                    self._request_epoch += 1
                 done.set()
+                return
+            except _RequestInterrupt:
+                continue
+
+    def _answer_leftovers(self) -> None:
+        """Fail every still-queued request so no connection thread hangs."""
+        while True:
+            try:
+                _request, box, done = self._work.get_nowait()
+            except queue.Empty:
+                return
+            box["error"] = RuntimeError("daemon executor stopped before executing the request")
+            done.set()
+
+    def _start_watchdog(self) -> None:
+        """Start the execution-budget monitor thread (idempotent)."""
+        if self._watchdog is not None:
+            return
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop,
+            name="ida-cli-daemon-watchdog",
+            daemon=True,
+        )
+        self._watchdog.start()
+
+    def _watchdog_loop(self) -> None:
+        """Interrupt the serving thread while one request overruns its welcome.
+
+        Two triggers: the execution budget, and stop() — a stopped executor
+        has abandoned the in-flight request, so making it wait out the full
+        budget would leave shutdown blocked behind a hung request. This loop
+        must key off _watchdog_stop rather than _stop for exactly that
+        reason; retiring on _stop would disarm the watchdog at the moment
+        the daemon needs it to unwedge the serve loop.
+        """
+        while not self._watchdog_stop.wait(self._timings.watchdog_poll):
+            with self._state_lock:
+                started = self._request_started
+                ident = self._serve_ident
+                if started is None or ident is None:
+                    continue
+                now = time.monotonic()
+                overdue = self._stop.is_set() or now - started >= self._exec_timeout
+                if not overdue or now - self._last_interrupt_at < self._timings.watchdog_refire:
+                    continue
+                self._last_interrupt_at = now
+                # The lock is held across the ctypes call on purpose: the
+                # serving thread must take it to start or finish a request,
+                # so the interrupt cannot land in the *next* request's work.
+                if _raise_async_in_thread(ident, _RequestInterrupt):
+                    print(
+                        f"ida-cli daemon: interrupting request after "
+                        f"{time.monotonic() - started:.1f}s (budget {self._exec_timeout:g}s)",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "ida-cli daemon: request exceeded its budget but this "
+                        "Python cannot interrupt threads (no ctypes); logging only",
+                        file=sys.stderr,
+                    )
 
     def stop(self) -> None:
-        """Ask serve() to return after the in-flight request completes."""
+        """Ask serve() to return, interrupting any request still in flight."""
         self._stop.set()
 
 
 class DaemonServer:
     """Accept client connections and serve the kernel runtime per connection."""
 
-    def __init__(self, target_path: str, runtime: Any) -> None:
+    def __init__(self, target_path: str, runtime: Any, *, timings: DaemonTimings = DEFAULT_TIMINGS) -> None:
         self._target_path = target_path
-        self._runtime = _MainThreadExecutor(runtime)
+        self._timings = timings
+        self._runtime = _MainThreadExecutor(runtime, timings)
         self._port_path = get_port_path(target_path)
         self._pid_path = get_pid_path(target_path)
         self._token_path = get_token_path(target_path)
         self._server: socket.socket | None = None
         self._port: int = 0
         self._token: str = ""
+        self._registration_written = False
 
     def start(self) -> None:
         """Bind the listening socket and write token, PID, and port files.
@@ -328,8 +676,12 @@ class DaemonServer:
         Binds 127.0.0.1:0 by default. Set IDA_CLI_DAEMON_HOST to bind another
         interface (e.g. 0.0.0.0 for WSL/Windows cross-access); any non-loopback
         bind prints a warning because it exposes kernel execution to the network.
+
+        Registration files are created with O_EXCL and never pre-cleaned:
+        deleting them first would let a second daemon orphan a live one. On
+        FileExistsError the owner is probed — a live daemon means
+        DaemonRunningError, stale files are removed and the write retried.
         """
-        _cleanup_daemon_files(self._target_path)
         host = os.environ.get("IDA_CLI_DAEMON_HOST", _DEFAULT_BIND_HOST)
         if host != _DEFAULT_BIND_HOST:
             print(
@@ -341,19 +693,51 @@ class DaemonServer:
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind((host, 0))
         self._port = self._server.getsockname()[1]
-        self._server.listen(5)
+        # Every liveness probe costs one connection and unauthenticated peers
+        # linger for _AUTH_TIMEOUT, so a small backlog makes concurrent
+        # clients time out on connect() against a perfectly healthy daemon.
+        self._server.listen(socket.SOMAXCONN)
         self._token = secrets.token_hex(32)
         try:
-            _write_private_file(self._token_path, self._token)
-            _write_private_file(self._pid_path, str(os.getpid()))
-            _write_private_file(self._port_path, str(self._port))
+            self._write_registration_files()
+        except FileExistsError:
+            self._handle_registration_conflict()
         except Exception:
-            try:
-                self._server.close()
-            finally:
-                self._server = None
-            _cleanup_daemon_files(self._target_path)
+            self._abort_start(cleanup=True)
             raise
+
+    def _write_registration_files(self) -> None:
+        """Write token, PID, and port files; O_EXCL guards every write."""
+        _write_private_file(self._token_path, self._token)
+        _write_private_file(self._pid_path, str(os.getpid()))
+        _write_private_file(self._port_path, str(self._port))
+        self._registration_written = True
+
+    def _handle_registration_conflict(self) -> None:
+        """Resolve a FileExistsError from the first registration write."""
+        if _probe_owner_alive(self._target_path, self._timings):
+            self._abort_start(cleanup=False)  # the files belong to the winner
+            raise DaemonRunningError(f"Daemon already running for {self._target_path!r}")
+        _cleanup_daemon_files(self._target_path)  # stale files from a dead daemon
+        try:
+            self._write_registration_files()
+        except Exception:
+            # No cleanup here: a third party may have won the fresh race, and
+            # partial files of ours are taken over by the next stale sweep.
+            self._abort_start(cleanup=False)
+            raise
+
+    def _abort_start(self, *, cleanup: bool) -> None:
+        """Close the listening socket after a failed start()."""
+        try:
+            if self._server is not None:
+                self._server.close()
+        except OSError:
+            pass
+        finally:
+            self._server = None
+        if cleanup:
+            _cleanup_daemon_files(self._target_path)
 
     def serve_forever(self, timeout: float | None = None) -> None:
         """Serve connections until shutdown; request execution stays on this thread."""
@@ -388,7 +772,18 @@ class DaemonServer:
                     conn, _addr = server.accept()
                 except socket.timeout:
                     break
-                except OSError:
+                except OSError as exc:
+                    if exc.errno in _ACCEPT_RETRYABLE_ERRNOS:
+                        # Out of file descriptors, not a dead listener. Killing
+                        # the daemon here would turn transient fd pressure --
+                        # which an unauthenticated peer can provoke -- into a
+                        # lost IDA session. Back off and keep accepting.
+                        print(
+                            f"ida-cli daemon: accept deferred, out of descriptors ({exc})",
+                            file=sys.stderr,
+                        )
+                        time.sleep(_ACCEPT_BACKOFF)
+                        continue
                     break
                 thread = threading.Thread(
                     target=self._serve_connection,
@@ -396,23 +791,56 @@ class DaemonServer:
                     name="ida-cli-daemon-client",
                     daemon=True,
                 )
-                thread.start()
+                try:
+                    thread.start()
+                except RuntimeError as exc:
+                    # "can't start new thread". This call sits outside the
+                    # accept try on purpose, so without this guard the error
+                    # escapes the loop and takes the whole daemon down; drop
+                    # the one connection instead.
+                    print(f"ida-cli daemon: cannot serve connection ({exc})", file=sys.stderr)
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    time.sleep(_ACCEPT_BACKOFF)
         finally:
             self._runtime.stop()
 
     def _serve_connection(self, conn: socket.socket) -> None:
         """Send the protocol banner, authenticate, then run one _serve() loop."""
         try:
-            conn.settimeout(_AUTH_TIMEOUT)
+            accepted_at = time.monotonic()
+            conn.settimeout(self._timings.auth_timeout)
             with conn.makefile(mode="r", encoding="utf-8", errors="replace") as stdin, \
                  conn.makefile(mode="w", encoding="utf-8", errors="replace") as stdout:
                 from .protocol import write_jsonl  # noqa: PLC0415
                 write_jsonl(stdout, _banner_payload())
-                if not self._authorize(stdin, stdout):
+                if not self._authorize(stdin, stdout, accepted_at):
                     return
                 conn.settimeout(None)
                 from .__main__ import _serve  # noqa: PLC0415
-                _serve(self._runtime, stdin, stdout)
+                try:
+                    _serve(self._runtime, stdin, stdout, control_handler=self._handle_control_message)
+                except (TimeoutError, RuntimeError) as exc:
+                    # The executor gave up on this request (budget exhausted, or
+                    # the kernel never dequeued it). Say so in the protocol
+                    # instead of dropping the socket: in daemon mode the client
+                    # cannot see our stderr, so a bare EOF is indistinguishable
+                    # from a crashed kernel.
+                    from .protocol import error_response  # noqa: PLC0415
+
+                    write_jsonl(
+                        stdout,
+                        error_response(
+                            None,
+                            error_type=type(exc).__name__,
+                            message=str(exc),
+                            traceback="",
+                            stdout="",
+                            stderr="",
+                        ),
+                    )
         except Exception as exc:
             print(f"ida-cli daemon: connection handler failed: {exc!r}", file=sys.stderr)
         finally:
@@ -422,11 +850,83 @@ class DaemonServer:
                 pass
             conn.close()
 
-    def _authorize(self, stdin: TextIO, stdout: TextIO) -> bool:
-        """Require the first client line to carry the daemon auth token."""
-        line = stdin.readline()
+    def _handle_control_message(self, line: str, stdout: TextIO) -> bool:
+        """Answer an authenticated shutdown message; True ends the session.
+
+        Runs on the connection thread and must never queue work onto the
+        executor — a hung request would otherwise block shutdown forever.
+        Anything that is not exactly a shutdown request returns False so the
+        normal request path parses (and validates) the line as before.
+
+        The match is deliberately exact — sole key, literal ``true``. The
+        control channel shares the request line format, so a loose check
+        would let an ordinary ``{"id":..,"code":..,"shutdown":true}`` request
+        silently kill the daemon instead of running, and ``1 == True`` in
+        Python would let a bare equality test accept ``{"shutdown": 1}``.
+        """
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(payload, dict) or set(payload) != {"shutdown"}:
+            return False
+        if payload["shutdown"] is not True:
+            return False
+        from .protocol import write_jsonl  # noqa: PLC0415
+
+        # Shut down *before* acknowledging: the ack is a promise that
+        # teardown has begun, and --shutdown starts its process-exit
+        # deadline the moment it reads this line. Acking first leaves a
+        # window where the caller polls a daemon that has not stopped yet.
+        # Closing the listener does not disturb this accepted connection.
+        self._initiate_shutdown()
+        write_jsonl(stdout, {"ok": True, "shutdown": True})
+        return True
+
+    def _initiate_shutdown(self) -> None:
+        """Stop request execution and close the listening socket.
+
+        Registration files are deliberately left for the serving thread's
+        shutdown(), which removes them under the ownership rule once
+        serve_forever() has unwound the session.
+        """
+        self._runtime.stop()
+        server = self._server
+        self._server = None
+        if server is not None:
+            try:
+                server.close()
+            except OSError:
+                pass
+
+    def _authorize(self, stdin: TextIO, stdout: TextIO, accepted_at: float | None = None) -> bool:
+        """Require the first client line to carry the daemon auth token.
+
+        The read is bounded in size and in total elapsed time, because
+        neither bound exists anywhere else on this path: the 16 MiB request
+        cap lives past authentication, and conn.settimeout is a per-recv
+        timeout, so a peer that drips one byte per half-timeout could hold a
+        pre-auth connection -- and its buffer -- indefinitely. Measured
+        before this bound: 1 GiB streamed pre-auth grew daemon RSS by
+        ~1.1 GiB at 432 MiB/s, per connection, with one thread each.
+
+        Residual: a single readline can still span several recvs, so a
+        dripping peer can stretch one handshake past auth_timeout; the
+        elapsed check below rejects it afterwards, and the size bound caps
+        what it can buffer meanwhile.
+        """
+        line = stdin.readline(_MAX_AUTH_LINE_CHARS + 1)
         if line == "":
             return False  # banner probe or peer vanished before presenting a token
+        if len(line) > _MAX_AUTH_LINE_CHARS:
+            print(
+                f"ida-cli daemon: rejecting pre-auth line over {_MAX_AUTH_LINE_CHARS} chars",
+                file=sys.stderr,
+            )
+            return False
+        if accepted_at is not None and time.monotonic() - accepted_at >= self._timings.auth_timeout:
+            print("ida-cli daemon: rejecting connection that outlived the auth budget", file=sys.stderr)
+            return False
         try:
             payload = json.loads(line)
         except ValueError:
@@ -449,7 +949,12 @@ class DaemonServer:
         return False
 
     def shutdown(self) -> None:
-        """Stop accepting and executing, close the socket, remove runtime files."""
+        """Stop accepting and executing, close the socket, remove runtime files.
+
+        Registration files are removed only when the PID file names this
+        process; after a lost start() race they belong to the surviving
+        daemon and must be left in place.
+        """
         self._runtime.stop()
         if self._server is not None:
             try:
@@ -457,14 +962,30 @@ class DaemonServer:
             except OSError:
                 pass
             self._server = None
-        _cleanup_daemon_files(self._target_path)
+        if self._owns_daemon_files():
+            _cleanup_daemon_files(self._target_path)
+
+    def _owns_daemon_files(self) -> bool:
+        """Return whether this server created the registration files.
+
+        Requires both a fully completed start() — a race loser may have
+        written its own PID file before failing, and must still not clean
+        up — and a PID file that names this process.
+        """
+        if not self._registration_written:
+            return False
+        try:
+            return int(Path(self._pid_path).read_text(encoding="utf-8").strip()) == os.getpid()
+        except (OSError, ValueError):
+            return False  # unreadable or foreign files are never ours to delete
 
 
 class DaemonClient:
     """Connect to a daemon and provide a JSONL transport."""
 
-    def __init__(self, target_path: str) -> None:
+    def __init__(self, target_path: str, *, timings: DaemonTimings = DEFAULT_TIMINGS) -> None:
         self._target_path = target_path
+        self._timings = timings
         self._addr: tuple[str, int] | None = None
         self._sock: socket.socket | None = None
         self._stdin: Any = None
@@ -487,13 +1008,13 @@ class DaemonClient:
                 self._sock.connect(self._addr)
                 break
             except (ConnectionRefusedError, OSError):
-                if time.monotonic() - started > _STARTUP_TIMEOUT:
+                if time.monotonic() - started > self._timings.startup_timeout:
                     raise TimeoutError(
-                        f"Daemon did not become available within {_STARTUP_TIMEOUT}s "
+                        f"Daemon did not become available within {self._timings.startup_timeout}s "
                         f"for {self._target_path!r}"
                     ) from None
-                time.sleep(_STARTUP_POLL_INTERVAL)
-        self._sock.settimeout(_AUTH_TIMEOUT)  # bound the banner read
+                time.sleep(self._timings.startup_poll_interval)
+        self._sock.settimeout(self._timings.auth_timeout)  # bound the banner read
         self._stdin = self._sock.makefile(mode="w", encoding="utf-8", errors="replace")
         self._stdout = self._sock.makefile(mode="r", encoding="utf-8", errors="replace")
         self._read_banner()
@@ -530,19 +1051,20 @@ class DaemonClient:
             ) from None
 
     def close(self) -> None:
-        """Close the client connection without shutting down the daemon."""
-        if self._stdin is not None:
-            try: self._stdin.close()
-            except OSError: pass
-            self._stdin = None
-        if self._stdout is not None:
-            try: self._stdout.close()
-            except OSError: pass
-            self._stdout = None
-        if self._sock is not None:
-            try: self._sock.close()
-            except OSError: pass
-            self._sock = None
+        """Close the client connection without shutting down the daemon.
+
+        Every handle is released even if an earlier one refuses to close, so
+        a half-torn-down client never leaks the socket.
+        """
+        for attribute in ("_stdin", "_stdout", "_sock"):
+            handle = getattr(self, attribute)
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except OSError:
+                pass
+            setattr(self, attribute, None)
 
     def write(self, data: str) -> None:
         """Write one JSONL line to the daemon."""
@@ -565,8 +1087,11 @@ class DaemonClient:
 
 
 __all__ = (
+    "DEFAULT_TIMINGS",
     "DaemonClient",
+    "DaemonRunningError",
     "DaemonServer",
+    "DaemonTimings",
     "get_port_path",
     "get_pid_path",
     "get_token_path",
