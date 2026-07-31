@@ -1,4 +1,4 @@
-"""Install IDA-CLI skills for Codex, Kimi Code, and Claude Code."""
+"""Install IDA-CLI skills for Codex, Kimi Code, Claude Code, and Reasonix."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 _SKILL_NAME = "ida-cli"
-_AGENTS = ("codex", "kimi", "claude")
+_AGENTS = ("codex", "kimi", "claude", "reasonix")
 
 
 class InstallError(RuntimeError):
@@ -76,6 +76,14 @@ def _default_root(agent: str) -> Path:
     if agent == "claude":
         home = os.environ.get("CLAUDE_CONFIG_DIR")
         return (Path(home) if home else Path.home() / ".claude") / "skills"
+    if agent == "reasonix":
+        home = os.environ.get("REASONIX_HOME")
+        if home:
+            return Path(home) / "skills"
+        if os.name == "nt":
+            appdata = os.environ.get("APPDATA")
+            return (Path(appdata) if appdata else Path.home() / "AppData" / "Roaming") / "reasonix" / "skills"
+        return Path.home() / ".reasonix" / "skills"
     raise InstallError(f"unsupported agent: {agent}")
 
 
@@ -90,7 +98,7 @@ def _repo_root() -> Path:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Install IDA-CLI skills for Codex, Kimi Code, and Claude Code.")
+    parser = argparse.ArgumentParser(description="Install IDA-CLI skills for Codex, Kimi Code, Claude Code, and Reasonix.")
     parser.add_argument("agent", choices=(*_AGENTS, "all"))
     parser.add_argument("--target-root", help="Override destination skills root for the selected agent.")
     parser.add_argument("--force", action="store_true", help="Replace an existing ida-cli skill directory.")

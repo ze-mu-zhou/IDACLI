@@ -12,7 +12,7 @@ Give your AI agent unrestricted, persistent, low-latency access to a real IDA da
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 > [!IMPORTANT]
-> This project is built for AI agents. We strongly recommend letting your agent (Kimi Code / Codex / Claude Code) handle the installation and setup instead of doing it manually.
+> This project is built for AI agents. We strongly recommend letting your agent (Kimi Code / Codex / Claude Code / Reasonix) handle the installation and setup instead of doing it manually.
 > 👉 [AI Installation Guide](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md)
 
 **[中文文档](https://github.com/ze-mu-zhou/IDACLI/blob/main/README.md)**
@@ -76,7 +76,7 @@ with AgentSession.start("target.i64", require_ida=True) as ida:
 ```
 
 ### Multi-Agent Skill Distribution
-Ships ready-to-install skills for **Kimi Code**, **Codex**, and **Claude Code** — one `install_skill.py` command and the agent knows how to drive IDA.
+Ships ready-to-install skills for **Kimi Code**, **Codex**, **Claude Code**, and **Reasonix** — one `install_skill.py` command and the agent knows how to drive IDA.
 
 ## Quick Start
 
@@ -128,6 +128,7 @@ python scripts/install_skill.py all --force
 python scripts/install_skill.py kimi --force
 python scripts/install_skill.py codex --force
 python scripts/install_skill.py claude --force
+python scripts/install_skill.py reasonix --force
 ```
 
 ### 4. Verify
@@ -189,6 +190,7 @@ Security model:
 │  Kimi Code   │ ◀────────────────────── │                  │
 │  Codex       │     stdout (JSONL)      │  ┌────────────┐  │
 │  Claude Code │                         │  │  IDAPython  │  │
+│  Reasonix    │                         │  │  + idalib   │  │
 └──────────────┘                         │  │  + idalib   │  │
                                          │  └────────────┘  │
        ┌─────────────────────────────────┤                  │

@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Reasonix skill flavor (`skills/reasonix/ida-cli/`), wired into `install_skill.py` (`reasonix` / `all`), `AI_INSTALL.md`, READMEs, and skill-distribution tests.
 - `--help` / `--version` CLI front door; `ida_cli.__version__` (kept in sync with `pyproject.toml` by test).
 - GitHub Actions CI: unittest matrix on ubuntu-latest / windows-latest, Python 3.11 / 3.12.
 - MIT `LICENSE` file and packaging metadata (license, authors, urls, classifiers).

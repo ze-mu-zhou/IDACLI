@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
 > [!IMPORTANT]
-> 本项目专为 AI Agent 设计。强烈建议让你的 Agent（Kimi Code / Codex / Claude Code）自行完成安装和配置，而非手动操作。
+> 本项目专为 AI Agent 设计。强烈建议让你的 Agent（Kimi Code / Codex / Claude Code / Reasonix）自行完成安装和配置，而非手动操作。
 > 👉 [AI 安装指南](https://github.com/ze-mu-zhou/IDACLI/blob/main/docs/AI_INSTALL.md)
 
 **[English](https://github.com/ze-mu-zhou/IDACLI/blob/main/README_EN.md)**
@@ -76,7 +76,7 @@ with AgentSession.start("target.i64", require_ida=True) as ida:
 ```
 
 ### 多 Agent Skill 分发
-内置 **Kimi Code**、**Codex**、**Claude Code** 的 skill 文件 — 一条 `install_skill.py` 命令，Agent 即刻学会驱动 IDA。
+内置 **Kimi Code**、**Codex**、**Claude Code**、**Reasonix** 的 skill 文件 — 一条 `install_skill.py` 命令，Agent 即刻学会驱动 IDA。
 
 ## 快速开始
 
@@ -127,6 +127,7 @@ python scripts/install_skill.py all --force
 python scripts/install_skill.py kimi --force
 python scripts/install_skill.py codex --force
 python scripts/install_skill.py claude --force
+python scripts/install_skill.py reasonix --force
 ```
 
 ### 4. 验证
@@ -188,6 +189,7 @@ with AgentSession.connect("target.i64") as ida:
 │  Kimi Code   │ ◀────────────────────── │                  │
 │  Codex       │     stdout (JSONL)      │  ┌────────────┐  │
 │  Claude Code │                         │  │  IDAPython  │  │
+│  Reasonix    │                         │  │  + idalib   │  │
 └──────────────┘                         │  │  + idalib   │  │
                                          │  └────────────┘  │
        ┌─────────────────────────────────┤                  │
